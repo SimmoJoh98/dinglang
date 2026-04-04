@@ -1,10 +1,10 @@
 # Ding Language Specification
 
-> Version 0.2.1 — Draft
+> Version 0.3.0 — Draft
 
 ## Overview
 
-Ding is a modern, compiled programming language that prioritizes clarity, developer ergonomics, and zero-surprise semantics. It compiles to JavaScript.
+Ding is a modern, compiled programming language that prioritizes clarity, developer ergonomics, and zero-surprise semantics. It compiles to both JavaScript and native binaries via C.
 
 ## File Extension
 
@@ -35,6 +35,67 @@ const name = "Ding"           // inferred as string
 const age: number = 1         // explicit annotation
 let items: string[] = []      // annotated array
 ```
+
+### Primitive Types
+
+Ding provides two levels of type precision: a **lazy path** using simple names that cover the common case, and a **precise path** with explicit widths and signedness for when you need full control.
+
+#### Integers
+
+| Ding type | C type | Size | Notes |
+|---|---|---|---|
+| `number` | `int64_t` | 64-bit signed | Default for all integers |
+| `int` | `int64_t` | 64-bit signed | Alias for `number` |
+| `int8` | `int8_t` | 8-bit signed | -128 to 127 |
+| `int16` | `int16_t` | 16-bit signed | -32,768 to 32,767 |
+| `int32` | `int32_t` | 32-bit signed | -2B to 2B |
+| `int64` | `int64_t` | 64-bit signed | Explicit 64-bit |
+| `byte` | `uint8_t` | 8-bit unsigned | 0 to 255 |
+| `uint8` | `uint8_t` | 8-bit unsigned | Alias for `byte` |
+| `uint16` | `uint16_t` | 16-bit unsigned | 0 to 65,535 |
+| `uint32` | `uint32_t` | 32-bit unsigned | 0 to 4B |
+| `uint64` | `uint64_t` | 64-bit unsigned | 0 to 18 quintillion |
+
+```
+const score: number = 42       // lazy — 64-bit signed, just works
+const r: uint8 = 255           // precise — exactly one byte
+const pixel: int32 = -1        // precise — 32-bit signed
+```
+
+#### Floats
+
+| Ding type | C type | Size | Notes |
+|---|---|---|---|
+| `float` | `double` | 64-bit | Default for all floats |
+| `double` | `double` | 64-bit | Alias for `float` |
+| `float32` | `float` | 32-bit | Single precision |
+| `float64` | `double` | 64-bit | Explicit double precision |
+
+```
+const pi: float = 3.14159      // lazy — 64-bit double
+const y: float32 = 1.0         // precies — 32-bit single precision
+```
+
+#### Strings
+
+| Ding type | C type | Notes |
+|---|---|---|
+| `string` | `char*` | Default. Arena-allocated, mutable. |
+| `cstring` | `const char*` | Zero-copy. For literals and C interop. |
+
+```
+const name: string = "Dallas"  // lazy — arena-allocated
+const tag: cstring = "v1.0"    // precise — zero-copy const pointer
+```
+
+#### Other
+
+| Ding type | C type | Notes |
+|---|---|---|
+| `bool` | `bool` | `true` / `false` |
+| `void` | `void` | No return value |
+
+When no annotation is provided, types are inferred: integer literals infer as `number` (int64), float literals as `float` (double), string literals as `string`. The JS target ignores all annotations — they only affect the C backend.
 
 ## Functions
 
@@ -315,20 +376,40 @@ obj.field = "new value"
 arr[0] = 42
 ```
 
-## Memory Management
+## Compilation Targets
 
-Ding supports multiple memory management strategies via the `@memory` build flag:
+Ding supports multiple compilation targets:
 
-| Flag              | Strategy                    |
-|-------------------|-----------------------------|
-| `@memory: gc`     | Garbage collection (default)|
-| `@memory: arc`    | Automatic reference counting|
-| `@memory: manual` | Manual memory management    |
+| Command                       | Description                        |
+|-------------------------------|------------------------------------|
+| `ding run <file>`             | Compile to C and execute (default) |
+| `ding run <file> --target js` | Compile to JS and execute          |
+| `ding build <file>`           | Compile to native binary via gcc   |
+| `ding build <file> --target js` | Compile to JS file               |
+| `ding build <file> --target c`  | Compile to C source file         |
 
-The memory strategy is set at build time:
+The default target is C (native binary). The C target requires `gcc` to be installed.
+
+## Memory Model
+
+The C target uses an arena allocator by default. All allocations come from a single contiguous block of memory that is freed when the program exits.
+
+| Strategy | Description | Status |
+|---|---|---|
+| Arena (default) | 256MB arena, fast allocation, no individual frees | Implemented |
+| `@memory: gc` | Boehm GC | Future |
+| `@memory: arc` | Automatic reference counting | Future |
+| `@memory: manual` | Raw malloc/free | Future |
+
+The arena strategy is ideal for short-lived programs, benchmarks, and batch processing. It provides near-zero allocation overhead at the cost of not reclaiming memory until program exit.
+
+## C Interop (Future)
+
+Planned support for calling C functions directly:
 
 ```
-ding build --memory arc main.dg
+extern fn malloc(size: number): any
+@c_header("mylib.h")
 ```
 
 ## Comments

@@ -1,0 +1,47 @@
+import { log } from 'ding:std'
+
+// ── Test 1: Tight loop — sum to 1 billion ───────────────────────────
+
+const countTo = (n) => {
+  let sum = 0
+  for i = 0..n {
+    sum = sum + i
+  }
+  return sum
+}
+
+const sum = countTo(1000000000)
+log(`Sum to 1B: ${sum}`)
+
+// ── Test 2: Nested loops — matrix multiply (N=500) ─────────────────
+
+const matmul = (n) => {
+  let total = 0
+  for i = 0..n {
+    for j = 0..n {
+      for k = 0..n {
+        total = total + 1
+      }
+    }
+  }
+  return total
+}
+
+const ops = matmul(500)
+log(`Matrix ops: ${ops}`)
+
+// ── Test 3: Fibonacci (iterative, N=80) ─────────────────────────────
+
+const fib = (n) => {
+  let a = 0
+  let b = 1
+  for i = 0..n {
+    let temp = a + b
+    a = b
+    b = temp
+  }
+  return a
+}
+
+const f = fib(80)
+log(`Fib(80): ${f}`)

@@ -1,59 +1,127 @@
 #!/usr/bin/env node
 
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { resolve, basename } from "node:path";
+import { execFileSync } from "node:child_process";
+import { Lexer } from "../lexer/index.js";
+import { Parser } from "../parser/index.js";
+import { Emitter } from "../emitter/index.js";
+import { DingError, formatError } from "../errors/index.js";
+
+const VERSION = "0.2.1";
 
 const args = process.argv.slice(2);
 const command = args[0];
 
-function usage(): void {
-  console.log(`
-ding - The Ding programming language
+function help(): void {
+  console.log(`Ding programming language v${VERSION}
 
 Usage:
-  ding run <file.dg>    Run a Ding source file
-  ding help             Show this help message
-`);
+  ding run <file>      compile and execute a .dg file
+  ding build <file>    compile .dg to .js
+  ding version         print version
+  ding help            show this message
+
+Examples:
+  ding run main.dg
+  ding build main.dg`);
+}
+
+function error(msg: string): never {
+  console.error(msg);
+  process.exit(1);
+}
+
+function compile(source: string): string {
+  const tokens = new Lexer(source).tokenize();
+  const ast = new Parser(tokens, source).parse();
+  return new Emitter(ast).emit();
 }
 
 async function run(filePath: string): Promise<void> {
   const resolved = resolve(filePath);
+  const source = await readSource(filePath, resolved);
 
-  if (!resolved.endsWith(".dg")) {
-    console.error(`Error: expected a .dg file, got "${filePath}"`);
-    process.exit(1);
-  }
-
-  let source: string;
+  let js: string;
   try {
-    source = await readFile(resolved, "utf-8");
-  } catch {
-    console.error(`Error: could not read file "${filePath}"`);
-    process.exit(1);
+    js = compile(source);
+  } catch (err) {
+    handleError(err);
   }
 
-  // TODO: lex → parse → emit → execute
-  console.log(`[ding] loaded ${filePath} (${source.length} bytes)`);
-  console.log("[ding] compiler pipeline not yet implemented");
+  execFileSync("node", ["--input-type=module", "--eval", js], {
+    stdio: "inherit",
+  });
+}
+
+async function build(filePath: string): Promise<void> {
+  const resolved = resolve(filePath);
+  const source = await readSource(filePath, resolved);
+
+  let js: string;
+  try {
+    js = compile(source);
+  } catch (err) {
+    handleError(err);
+  }
+
+  const outPath = resolved.replace(/\.dg$/, ".js");
+  await writeFile(outPath, js + "\n", "utf-8");
+  console.log(`[ding] compiled ${basename(filePath)} → ${basename(outPath)}`);
+}
+
+function handleError(err: unknown): never {
+  if (err instanceof DingError) {
+    process.stderr.write(formatError(err) + "\n");
+    process.exit(1);
+  }
+  // Genuine bug — show internal error info
+  process.stderr.write(`Internal error: ${err instanceof Error ? err.message : String(err)}\n`);
+  process.stderr.write("This is a bug in the Ding compiler.\n");
+  process.stderr.write("Please report it at github.com/user/dinglang\n");
+  if (err instanceof Error && err.stack) {
+    process.stderr.write(err.stack + "\n");
+  }
+  process.exit(1);
+}
+
+async function readSource(filePath: string, resolved: string): Promise<string> {
+  if (!existsSync(resolved)) {
+    error(`File not found: ${filePath}`);
+  }
+  try {
+    return await readFile(resolved, "utf-8");
+  } catch {
+    error(`File not found: ${filePath}`);
+  }
+}
+
+function requireFile(file: string | undefined, cmd: string): string {
+  if (!file) {
+    error(`Missing file argument\nUsage: ding ${cmd} <file.dg>`);
+  }
+  return file;
 }
 
 switch (command) {
   case "run": {
-    const file = args[1];
-    if (!file) {
-      console.error("Error: missing file argument\n");
-      usage();
-      process.exit(1);
-    }
+    const file = requireFile(args[1], "run");
     await run(file);
     break;
   }
+  case "build": {
+    const file = requireFile(args[1], "build");
+    await build(file);
+    break;
+  }
+  case "version":
+    console.log(`Ding v${VERSION}`);
+    break;
   case "help":
   case undefined:
-    usage();
+    help();
     break;
   default:
-    console.error(`Unknown command: ${command}\n`);
-    usage();
-    process.exit(1);
+    error(`Unknown command: ${command}\nRun 'ding help' for usage`);
 }

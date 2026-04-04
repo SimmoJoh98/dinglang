@@ -1,17 +1,18 @@
 {
   "name": "dinglang",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "The Ding programming language",
   "type": "module",
   "bin": {
-    "ding": "./dist/cli/index.js"
+    "ding": "./bin/ding.js"
   },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
+    "build": "tsc --outDir dist",
+    "build:binary": "bun build src/cli/index.ts --compile --outfile ding-bin",
+    "dev": "node --loader ts-node/esm src/cli/index.ts",
+    "link": "npm run build && npm link",
     "test": "vitest",
-    "test:run": "vitest run",
-    "ding": "node --loader ts-node/esm src/cli/index.ts"
+    "test:run": "vitest run"
   },
   "keywords": ["programming-language", "compiler", "ding", "dinglang"],
   "license": "MIT",

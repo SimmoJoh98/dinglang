@@ -1,0 +1,53 @@
+import { log } from 'ding:std'
+import { floor, random } from 'ding:math'
+
+struct Player {
+  name: string
+  health: number
+  inventory: string[]
+
+  const greet = (self) => {
+    log(`I am ${self.name}, health: ${self.health}`)
+  }
+
+  const addItem = (self, item: string) => {
+    self.inventory.push(item)
+  }
+}
+
+const player = Player {
+  name: "Dallas",
+  health: 100,
+  inventory: []
+}
+
+player.greet()
+player.addItem("Gold Bar")
+player.addItem("Diamond")
+
+log(`Inventory size: ${#player.inventory}`)
+
+for item in player.inventory {
+  log(`- ${item}`)
+}
+
+let i = 0
+for i = 0..3 {
+  player.health = player.health - 10
+  log(`Hit! Health: ${player.health}`)
+}
+
+const safeGet = (arr, idx) => {
+  try {
+    const val = arr[idx]
+    if (val == null) {
+      throw "index out of range"
+    }
+    return val
+  } catch (e) {
+    return null
+  }
+}
+
+const item = safeGet(player.inventory, 0) ?? "nothing"
+log(`First item: ${item}`)

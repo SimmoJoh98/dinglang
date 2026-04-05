@@ -49,6 +49,7 @@ Usage:
   ding build <file>             compile to native binary via gcc
   ding build <file> --target js compile to JS file
   ding build <file> --target c  compile to C source file
+  ding lsp                      start the Ding LSP server on stdio
   ding version                  print version
   ding help                     show this message
 
@@ -223,6 +224,13 @@ switch (command) {
   case "build": {
     const file = requireFile(cleanArgs[1], "build");
     await build(file, target);
+    break;
+  }
+  case "lsp": {
+    // Lazy import so normal CLI usage doesn't pay the LSP startup cost,
+    // and any stray import-time output can't leak onto stdout.
+    const { startServer } = await import("../lsp/server.js");
+    startServer();
     break;
   }
   case "version":

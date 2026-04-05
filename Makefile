@@ -1,4 +1,4 @@
-.PHONY: build binary link test clean
+.PHONY: build binary link test clean lsp
 
 build:
 	npx tsc --outDir dist
@@ -11,6 +11,9 @@ link:
 
 test:
 	pnpm vitest run
+
+lsp:
+	node dist/lsp/server.js
 
 clean:
 	rm -rf dist/ ding-bin

@@ -4,49 +4,64 @@ import { resolve } from "node:path";
 import { Lexer } from "../src/lexer/index.js";
 import { Parser } from "../src/parser/index.js";
 import { CEmitter } from "../src/emitter/index.js";
+import { extractDirectives } from "../src/directives/index.js";
 
+/** Matches the CLI's compileC pipeline: extract file-level directives
+ *  first, then lex/parse/emit using the stripped source. This keeps
+ *  every test honest about what users actually see end-to-end. */
 function compileC(source: string): string {
-  const tokens = new Lexer(source).tokenize();
-  const ast = new Parser(tokens, source).parse();
-  return new CEmitter().emit(ast);
+  const { directives, source: stripped } = extractDirectives(source);
+  const tokens = new Lexer(stripped).tokenize();
+  const ast = new Parser(tokens, stripped).parse();
+  return new CEmitter({ arenaSize: directives.arenaSize }).emit(ast);
 }
 
 // ── Basic types ───────────────────────────────────────────────────────
 
+// Top-level bindings are lifted to C globals (with `ding_g_` prefix) and
+// initialized inside `ding_init_globals()`. These tests verify both the
+// static declaration and the initializer form.
+
 describe("C Emitter: basic types", () => {
   it("should emit integer declaration", () => {
     const result = compileC("const x = 42");
-    expect(result).toContain("ding_int x = 42;");
+    expect(result).toContain("static ding_int ding_g_x;");
+    expect(result).toContain("ding_g_x = 42;");
   });
 
   it("should emit float declaration", () => {
     const result = compileC("const f = 3.14");
-    expect(result).toContain("ding_float f = 3.14;");
+    expect(result).toContain("static ding_float ding_g_f;");
+    expect(result).toContain("ding_g_f = 3.14;");
   });
 
   it("should emit string declaration", () => {
     const result = compileC('const s = "hello"');
-    expect(result).toContain('ding_string s = "hello";');
+    expect(result).toContain("static ding_string ding_g_s;");
+    expect(result).toContain('ding_g_s = "hello";');
   });
 
   it("should emit bool declaration", () => {
     const result = compileC("const b = true");
-    expect(result).toContain("ding_bool b = true;");
+    expect(result).toContain("static ding_bool ding_g_b;");
+    expect(result).toContain("ding_g_b = true;");
   });
 
   it("should emit false boolean", () => {
     const result = compileC("const b = false");
-    expect(result).toContain("ding_bool b = false;");
+    expect(result).toContain("ding_g_b = false;");
   });
 
   it("should emit null as DING_VALUE_NULL", () => {
     const result = compileC("const x = null");
-    expect(result).toContain("DingValue x = DING_VALUE_NULL;");
+    expect(result).toContain("static DingValue ding_g_x;");
+    expect(result).toContain("ding_g_x = DING_VALUE_NULL;");
   });
 
   it("should emit let same as const (C has no let)", () => {
     const result = compileC("let x = 5");
-    expect(result).toContain("ding_int x = 5;");
+    expect(result).toContain("static ding_int ding_g_x;");
+    expect(result).toContain("ding_g_x = 5;");
   });
 });
 
@@ -118,7 +133,8 @@ const p = Point { x: 1, y: 2 }`);
 }
 const d = Dog { name: "Rex" }
 d.bark()`);
-    expect(result).toContain("Dog_bark(d)");
+    // `d` is now a top-level global → ding_g_d
+    expect(result).toContain("Dog_bark(ding_g_d)");
   });
 
   it("should emit struct method with self as pointer", () => {
@@ -138,17 +154,17 @@ describe("C Emitter: arrays", () => {
   it("should emit array literal as ding_array_new + push calls", () => {
     const result = compileC("const arr = [1, 2, 3]");
     expect(result).toContain("ding_array_new()");
-    expect(result).toContain("ding_array_push(arr,");
+    expect(result).toContain("ding_array_push(ding_g_arr,");
   });
 
   it("should emit array access as ding_array_get", () => {
     const result = compileC("const arr = [1, 2, 3]\nconst x = arr[0]");
-    expect(result).toContain("ding_array_get(arr, 0)");
+    expect(result).toContain("ding_array_get(ding_g_arr, 0)");
   });
 
   it("should emit #arr as arr->length", () => {
     const result = compileC("const arr = [1, 2, 3]\nconst len = #arr");
-    expect(result).toContain("arr->length");
+    expect(result).toContain("ding_g_arr->length");
   });
 });
 
@@ -162,8 +178,8 @@ describe("C Emitter: loops", () => {
 
   it("should emit for in as C for loop over array items", () => {
     const result = compileC("const arr = [1, 2, 3]\nfor item in arr { item }");
-    expect(result).toContain("for (ding_int __i = 0; __i < arr->length; __i++)");
-    expect(result).toContain("DingValue item = arr->items[__i];");
+    expect(result).toContain("for (ding_int __i = 0; __i < ding_g_arr->length; __i++)");
+    expect(result).toContain("DingValue item = ding_g_arr->items[__i];");
   });
 
   it("should emit while as C while", () => {
@@ -335,76 +351,88 @@ describe("C Emitter: assignment", () => {
 describe("C Emitter: sized integer types", () => {
   it("should emit int8 annotation", () => {
     const result = compileC("const x: int8 = 42");
-    expect(result).toContain("ding_int8 x = 42;");
+    expect(result).toContain("static ding_int8 ding_g_x;");
+    expect(result).toMatch(/ding_g_x = \(ding_int8\)\(42\);/);
   });
 
   it("should emit int16 annotation", () => {
     const result = compileC("const x: int16 = 1000");
-    expect(result).toContain("ding_int16 x = 1000;");
+    expect(result).toContain("static ding_int16 ding_g_x;");
+    expect(result).toMatch(/ding_g_x = \(ding_int16\)\(1000\);/);
   });
 
   it("should emit int32 annotation", () => {
     const result = compileC("const x: int32 = 100000");
-    expect(result).toContain("ding_int32 x = 100000;");
+    expect(result).toContain("static ding_int32 ding_g_x;");
+    expect(result).toMatch(/ding_g_x = \(ding_int32\)\(100000\);/);
   });
 
   it("should emit int64 annotation", () => {
     const result = compileC("const x: int64 = 42");
-    expect(result).toContain("ding_int64 x = 42;");
+    expect(result).toContain("static ding_int64 ding_g_x;");
+    // int64 is equivalent to ding_int — no cast needed
+    expect(result).toContain("ding_g_x = 42;");
   });
 
   it("should emit uint8 annotation", () => {
     const result = compileC("const x: uint8 = 255");
-    expect(result).toContain("ding_uint8 x = 255;");
+    expect(result).toContain("static ding_uint8 ding_g_x;");
+    expect(result).toMatch(/ding_g_x = \(ding_uint8\)\(255\);/);
   });
 
   it("should emit uint16 annotation", () => {
     const result = compileC("const x: uint16 = 65535");
-    expect(result).toContain("ding_uint16 x = 65535;");
+    expect(result).toContain("static ding_uint16 ding_g_x;");
+    expect(result).toMatch(/ding_g_x = \(ding_uint16\)\(65535\);/);
   });
 
   it("should emit uint32 annotation", () => {
     const result = compileC("const x: uint32 = 42");
-    expect(result).toContain("ding_uint32 x = 42;");
+    expect(result).toContain("static ding_uint32 ding_g_x;");
   });
 
   it("should emit uint64 annotation", () => {
     const result = compileC("const x: uint64 = 42");
-    expect(result).toContain("ding_uint64 x = 42;");
+    expect(result).toContain("static ding_uint64 ding_g_x;");
   });
 
   it("should emit byte as uint8", () => {
     const result = compileC("const x: byte = 0");
-    expect(result).toContain("ding_byte x = 0;");
+    expect(result).toContain("static ding_byte ding_g_x;");
   });
 
   it("should emit int as alias for ding_int", () => {
     const result = compileC("const x: int = 42");
-    expect(result).toContain("ding_int x = 42;");
+    expect(result).toContain("static ding_int ding_g_x;");
   });
 });
 
 describe("C Emitter: sized float types", () => {
   it("should emit float32 annotation", () => {
     const result = compileC("const x: float32 = 1.5");
-    expect(result).toContain("ding_float32 x = 1.5;");
+    expect(result).toContain("static ding_float32 ding_g_x;");
+    // float32 is narrower than ding_float (double), so a cast appears
+    expect(result).toMatch(/ding_g_x = \(ding_float32\)\(1\.5\);/);
   });
 
   it("should emit float64 annotation", () => {
     const result = compileC("const x: float64 = 3.14");
-    expect(result).toContain("ding_float64 x = 3.14;");
+    expect(result).toContain("static ding_float64 ding_g_x;");
+    // float64 is equivalent to ding_float — no cast needed
+    expect(result).toContain("ding_g_x = 3.14;");
   });
 
   it("should emit double as alias for float64", () => {
     const result = compileC("const x: double = 2.71");
-    expect(result).toContain("ding_float64 x = 2.71;");
+    expect(result).toContain("static ding_float64 ding_g_x;");
   });
 });
 
 describe("C Emitter: cstring type", () => {
   it("should emit cstring annotation", () => {
     const result = compileC('const tag: cstring = "v1.0"');
-    expect(result).toContain('ding_cstring tag = "v1.0";');
+    expect(result).toContain("static ding_cstring ding_g_tag;");
+    expect(result).toContain('ding_g_tag = "v1.0";');
   });
 });
 
@@ -461,6 +489,131 @@ describe("C Emitter: runtime includes sized typedefs", () => {
   it("should include cstring typedef in runtime", () => {
     const result = compileC("const x = 1");
     expect(result).toContain("typedef const char* ding_cstring;");
+  });
+});
+
+// ── Top-level globals (lifted bindings) ──────────────────────────────
+
+describe("C Emitter: top-level globals", () => {
+  it("should lift a top-level const into a static global with ding_g_ prefix", () => {
+    const result = compileC('const name = "Dallas"');
+    expect(result).toContain("static ding_string ding_g_name;");
+    expect(result).toContain('ding_g_name = "Dallas";');
+    // Initialization happens inline in main(), not in a separate init function
+    expect(result).not.toContain("ding_init_globals()");
+  });
+
+  it("should initialize globals in source order interleaved with top-level statements", () => {
+    // If globals were batch-initialized before main body, `item` would be
+    // computed before the push and the #arr would be 0. We assert the
+    // relative ordering of the emitted assignments in main().
+    const source = `import { log } from 'ding:std'
+const arr = [1]
+log(arr[0])
+const n = #arr`;
+    const result = compileC(source);
+    const arrInit = result.indexOf("ding_g_arr = ding_array_new()");
+    const logCall = result.indexOf("ding_log(ding_array_get(ding_g_arr");
+    const nInit = result.indexOf("ding_g_n =");
+    expect(arrInit).toBeGreaterThan(-1);
+    expect(logCall).toBeGreaterThan(arrInit);
+    expect(nInit).toBeGreaterThan(logCall);
+  });
+
+  it("should reference a global from inside a top-level function via ding_g_", () => {
+    const source = `const name = "Dallas"
+const greet = () => name`;
+    const result = compileC(source);
+    expect(result).toContain("static ding_string ding_g_name;");
+    // Inside ding_fn_greet, the reference to `name` is mangled
+    expect(result).toMatch(/ding_fn_greet\([^)]*\)\s*{[^}]*ding_g_name/);
+  });
+
+  it("should allow a global let to be mutated from inside a function", () => {
+    const source = `let counter = 0
+const bump = () => { counter = counter + 1 }`;
+    const result = compileC(source);
+    expect(result).toContain("static ding_int ding_g_counter;");
+    // Both the target and the RHS reference should be mangled
+    expect(result).toMatch(/ding_g_counter\s*=\s*ding_g_counter\s*\+\s*1/);
+  });
+
+  it("should not mangle a local variable that shadows a global of the same name", () => {
+    const source = `const name = "global"
+const fn = (name: string) => {
+  return name
+}`;
+    const result = compileC(source);
+    // Global declaration exists
+    expect(result).toContain("static ding_string ding_g_name;");
+    // Inside ding_fn_fn, the parameter reference is the raw `name`, not ding_g_name.
+    // We check that the return expression wraps the plain `name` identifier.
+    expect(result).toContain("ding_string name");
+    expect(result).toMatch(/return \(DingValue\){\.type=DING_STRING, \.as_string=name}/);
+  });
+
+  it("should emit a struct-instantiation global via multi-line init", () => {
+    const source = `struct Point { x: number; y: number }
+const p = Point { x: 1, y: 2 }`;
+    const result = compileC(source);
+    expect(result).toContain("static Point* ding_g_p;");
+    expect(result).toContain("ding_g_p = (Point*)ding_alloc(sizeof(Point));");
+    expect(result).toContain("ding_g_p->x = 1;");
+    expect(result).toContain("ding_g_p->y = 2;");
+  });
+
+  it("should emit an array-literal global via ding_array_new + pushes", () => {
+    const source = "const arr = [10, 20, 30]";
+    const result = compileC(source);
+    expect(result).toContain("static DingArray* ding_g_arr;");
+    expect(result).toContain("ding_g_arr = ding_array_new();");
+    expect(result).toContain("ding_array_push(ding_g_arr,");
+  });
+});
+
+// ── Arena size directive ─────────────────────────────────────────────
+
+describe("C Emitter: arena size directive", () => {
+  it("uses the 256MB default when no directive is present", () => {
+    const result = compileC("const x = 1");
+    expect(result).toContain(`#define DING_ARENA_SIZE (${256 * 1024 * 1024}ULL)`);
+  });
+
+  it("honours a 1GB directive at the top of the file", () => {
+    const source = `#[arena(size = 1GB)]
+const x = 1`;
+    const result = compileC(source);
+    expect(result).toContain(`#define DING_ARENA_SIZE (${1024 * 1024 * 1024}ULL)`);
+    // The directive itself never leaks into the emitted C.
+    expect(result).not.toContain("#[arena");
+  });
+
+  it("honours a 64KB directive", () => {
+    const source = `#[arena(size = 64KB)]
+const x = 1`;
+    const result = compileC(source);
+    expect(result).toContain(`#define DING_ARENA_SIZE (${64 * 1024}ULL)`);
+  });
+
+  it("allows blank lines and comments before the directive", () => {
+    const source = `
+// Bigger arena for graphics workloads
+#[arena(size = 2GB)]
+import { log } from 'ding:std'
+log(42)`;
+    const result = compileC(source);
+    expect(result).toContain(`#define DING_ARENA_SIZE (${2 * 1024 * 1024 * 1024}ULL)`);
+  });
+
+  it("still compiles the rest of the program correctly when a directive is present", () => {
+    const source = `#[arena(size = 128MB)]
+const name = "Dallas"
+const greet = () => name`;
+    const result = compileC(source);
+    expect(result).toContain(`#define DING_ARENA_SIZE (${128 * 1024 * 1024}ULL)`);
+    // Globals still get lifted; function still references the lifted binding.
+    expect(result).toContain("static ding_string ding_g_name;");
+    expect(result).toMatch(/ding_fn_greet\([^)]*\)\s*{[^}]*ding_g_name/);
   });
 });
 

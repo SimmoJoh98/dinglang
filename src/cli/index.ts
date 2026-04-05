@@ -8,6 +8,7 @@ import { Lexer } from "../lexer/index.js";
 import { Parser } from "../parser/index.js";
 import { Emitter, CEmitter } from "../emitter/index.js";
 import { DingError, formatError } from "../errors/index.js";
+import { extractDirectives } from "../directives/index.js";
 
 const VERSION = "0.3.0";
 
@@ -65,15 +66,20 @@ function error(msg: string): never {
 }
 
 function compileJS(source: string): string {
-  const tokens = new Lexer(source).tokenize();
-  const ast = new Parser(tokens, source).parse();
+  // Directives are a C-backend feature today; for the JS target we still
+  // strip them so the user can keep a single `.dg` file portable across
+  // targets without the lexer seeing `#[...]`.
+  const { source: stripped } = extractDirectives(source);
+  const tokens = new Lexer(stripped).tokenize();
+  const ast = new Parser(tokens, stripped).parse();
   return new Emitter(ast).emit();
 }
 
 function compileC(source: string): string {
-  const tokens = new Lexer(source).tokenize();
-  const ast = new Parser(tokens, source).parse();
-  return new CEmitter().emit(ast);
+  const { directives, source: stripped } = extractDirectives(source);
+  const tokens = new Lexer(stripped).tokenize();
+  const ast = new Parser(tokens, stripped).parse();
+  return new CEmitter({ arenaSize: directives.arenaSize }).emit(ast);
 }
 
 function checkGcc(): void {

@@ -1,7 +1,13 @@
-export const C_ARENA = `\
+/** Default arena capacity in bytes. Overridable via the `#[arena(size=...)]`
+ *  file-level directive; see `src/directives/index.ts`. */
+export const DEFAULT_ARENA_SIZE = 256 * 1024 * 1024;
+
+/** Emit the arena runtime with a specific capacity baked in. */
+export function cArena(sizeBytes: number = DEFAULT_ARENA_SIZE): string {
+  return `\
 // ── Arena allocator ─────────────────────────────────────────────────
 
-#define DING_ARENA_SIZE (256 * 1024 * 1024)
+#define DING_ARENA_SIZE (${sizeBytes}ULL)
 
 typedef struct {
   uint8_t* base;
@@ -103,3 +109,8 @@ DingValue ding_array_get(DingArray* arr, ding_int idx) {
   return arr->items[idx];
 }
 `;
+}
+
+/** Backwards-compatible alias: the default-sized arena runtime string.
+ *  New code should prefer `cArena(size)` and pass an explicit size. */
+export const C_ARENA = cArena();

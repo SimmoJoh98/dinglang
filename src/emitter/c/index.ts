@@ -1,12 +1,10 @@
 import { DingError } from "../../errors/index.js";
-import { isDingModule } from "../../std/index.js";
 import type {
   Program,
   Statement,
   Expression,
   VariableDeclaration,
   ExpressionStatement,
-  ImportDeclaration,
   ReturnStatement,
   IfStatement,
   BinaryExpression,
@@ -30,13 +28,8 @@ import type {
   AssignmentExpression,
 } from "../../ast/nodes.js";
 import { C_RUNTIME } from "./runtime.js";
-import { C_ARENA } from "./arena.js";
-import {
-  C_STDLIB_STD,
-  C_STDLIB_MATH,
-  C_STD_FUNCTION_MAP,
-  C_MATH_FUNCTION_MAP,
-} from "./stdlib.js";
+import { cArena, DEFAULT_ARENA_SIZE } from "./arena.js";
+import { C_STDLIB_STD, C_STDLIB_MATH } from "./stdlib.js";
 import {
   inferCType,
   mapAnnotationToCType,
@@ -47,49 +40,59 @@ import {
   isStringType,
   type CType,
 } from "./types.js";
+import { Resolver } from "./resolver.js";
+
+/** Prefix for lifted top-level bindings in emitted C. Avoids collisions
+ *  with C keywords and makes the emitted file greppable. */
+const GLOBAL_PREFIX = "ding_g_";
+
+export interface CEmitterOptions {
+  /** Arena capacity in bytes. When omitted, the emitter uses
+   *  DEFAULT_ARENA_SIZE. File-level `#[arena(size=...)]` directives
+   *  are extracted by `extractDirectives` before the emitter runs
+   *  and flow in through this option. */
+  arenaSize?: number;
+}
 
 export class CEmitter {
   private indent: number = 0;
   private output: string[] = [];
-  private structs: Map<string, StructDeclaration> = new Map();
-  private functions: Map<string, { params: ArrowFunction["params"]; returnType?: CType }> = new Map();
-  private importedStd: boolean = false;
-  private importedMath: boolean = false;
-  private stdRenames: Map<string, string> = new Map();
-  private mathRenames: Map<string, string> = new Map();
-  private variableTypes: Map<string, CType> = new Map();
   private tempCounter: number = 0;
   private currentReturnType: CType | null = null;
+  private resolver: Resolver = new Resolver();
+  private arenaSize: number;
+
+  constructor(options: CEmitterOptions = {}) {
+    this.arenaSize = options.arenaSize ?? DEFAULT_ARENA_SIZE;
+  }
+
+  /** Accessors: resolver is the single source of truth for these. */
+  private get structs() { return this.resolver.structs; }
+  private get functions() { return this.resolver.functions; }
+  private get stdRenames() { return this.resolver.stdRenames; }
+  private get mathRenames() { return this.resolver.mathRenames; }
 
   emit(program: Program): string {
-    // Pass 1: collect struct declarations, function declarations, and imports
-    for (const stmt of program.body) {
-      if (stmt.type === "StructDeclaration") {
-        this.structs.set(stmt.name, stmt);
-      }
-      if (stmt.type === "ImportDeclaration") {
-        this.processImport(stmt);
-      }
-      if (stmt.type === "VariableDeclaration" && stmt.init.type === "ArrowFunction") {
-        const fn = stmt.init;
-        const returnType = fn.returnType ? mapAnnotationToCType(fn.returnType) : undefined;
-        this.functions.set(stmt.name, { params: fn.params, returnType });
-      }
-    }
+    // Type-resolution pass: owns all type/call-target/struct/import queries.
+    // The emitter only keeps variableTypes for its own incremental scope
+    // bookkeeping during emission.
+    this.resolver = new Resolver();
+    this.resolver.resolve(program);
 
     const sections: string[] = [];
 
     // Runtime header
     sections.push(C_RUNTIME);
 
-    // Arena allocator
-    sections.push(C_ARENA);
+    // Arena allocator (capacity baked in from the CEmitter options;
+    // a `#[arena(size=...)]` directive flows through here)
+    sections.push(cArena(this.arenaSize));
 
     // Stdlib sections
-    if (this.importedStd) {
+    if (this.resolver.importedStd) {
       sections.push(C_STDLIB_STD);
     }
-    if (this.importedMath) {
+    if (this.resolver.importedMath) {
       sections.push(C_STDLIB_MATH);
     }
 
@@ -110,7 +113,19 @@ export class CEmitter {
       }
     }
 
-    // Top-level function declarations
+    // Static declarations for top-level globals. Must come before any
+    // top-level function that references them. The *initialization* of
+    // each global happens inline in main() at the point where the user
+    // wrote the declaration — that way top-level statements and
+    // declarations stay interleaved in source order, which is the only
+    // way things like `const item = safeGet(player.inventory, 0)` can
+    // see the effects of earlier top-level `player.addItem(...)` calls.
+    for (const name of this.resolver.globalOrder) {
+      const cType = this.resolver.globals.get(name)!;
+      sections.push(`static ${cType} ${GLOBAL_PREFIX}${name};`);
+    }
+
+    // Top-level function declarations + main body
     const mainStatements: string[] = [];
 
     for (const stmt of program.body) {
@@ -119,6 +134,15 @@ export class CEmitter {
 
       if (stmt.type === "VariableDeclaration" && stmt.init.type === "ArrowFunction") {
         sections.push(this.emitTopLevelFunction(stmt.name, stmt.init));
+        continue;
+      }
+
+      // Top-level non-function VariableDeclaration → emit its initializer
+      // inline into main() as an assignment to the lifted global.
+      if (stmt.type === "VariableDeclaration") {
+        this.indent++;
+        mainStatements.push(this.emitGlobalInit(stmt));
+        this.indent--;
         continue;
       }
 
@@ -141,34 +165,41 @@ export class CEmitter {
     return sections.join("\n");
   }
 
-  // ── Import processing ───────────────────────────────────────────────
+  /** Emit the initializer for a top-level (global) VariableDeclaration as
+   *  one or more C statements that assign into the lifted ding_g_<name>. */
+  private emitGlobalInit(decl: VariableDeclaration): string {
+    const name = decl.name;
+    const gName = `${GLOBAL_PREFIX}${name}`;
+    const init = decl.init;
 
-  private processImport(node: ImportDeclaration): void {
-    if (!isDingModule(node.source)) return;
-
-    if (node.source === "ding:std") {
-      this.importedStd = true;
-      if (node.default) {
-        const mapped = C_STD_FUNCTION_MAP[node.default];
-        if (mapped) this.stdRenames.set(node.default, mapped);
+    // Array literal: allocate + push each element.
+    if (init.type === "ArrayLiteral") {
+      const lines: string[] = [];
+      lines.push(`${this.pad()}${gName} = ding_array_new();`);
+      for (const elem of init.elements) {
+        const elemExpr = this.emitExpression(elem);
+        const elemType = this.resolveType(elem);
+        const wrapped = wrapAsDingValue(elemExpr, elemType);
+        lines.push(`${this.pad()}ding_array_push(${gName}, ${wrapped});`);
       }
-      for (const name of node.named) {
-        const mapped = C_STD_FUNCTION_MAP[name];
-        if (mapped) this.stdRenames.set(name, mapped);
-      }
+      return lines.join("\n");
     }
 
-    if (node.source === "ding:math") {
-      this.importedMath = true;
-      if (node.default) {
-        const mapped = C_MATH_FUNCTION_MAP[node.default];
-        if (mapped) this.mathRenames.set(node.default, mapped);
+    // Struct instantiation: allocate + set each field.
+    if (init.type === "StructInstantiation") {
+      const lines: string[] = [];
+      lines.push(`${this.pad()}${gName} = (${init.name}*)ding_alloc(sizeof(${init.name}));`);
+      for (const field of init.fields) {
+        const val = this.emitExpression(field.value);
+        lines.push(`${this.pad()}${gName}->${field.name} = ${val};`);
       }
-      for (const name of node.named) {
-        const mapped = C_MATH_FUNCTION_MAP[name];
-        if (mapped) this.mathRenames.set(name, mapped);
-      }
+      return lines.join("\n");
     }
+
+    // Simple scalar / expression initializer — coerce to the global's type.
+    const cType = this.resolver.globals.get(name)!;
+    const value = this.emitAs(init, cType);
+    return `${this.pad()}${gName} = ${value};`;
   }
 
   // ── Statements ──────────────────────────────────────────────────────
@@ -228,7 +259,6 @@ export class CEmitter {
       cType = this.resolveType(node.init);
     }
 
-    this.variableTypes.set(node.name, cType);
     const init = this.emitExpression(node.init);
     return `${this.pad()}${cType} ${node.name} = ${init};`;
   }
@@ -236,7 +266,6 @@ export class CEmitter {
   private emitArrayDeclaration(name: string, node: ArrayLiteral): string {
     const lines: string[] = [];
     lines.push(`${this.pad()}DingArray* ${name} = ding_array_new();`);
-    this.variableTypes.set(name, "DingArray*");
     for (const elem of node.elements) {
       const elemExpr = this.emitExpression(elem);
       const elemType = inferCType(elem);
@@ -253,7 +282,6 @@ export class CEmitter {
       const val = this.emitExpression(field.value);
       lines.push(`${this.pad()}${name}->${field.name} = ${val};`);
     }
-    this.variableTypes.set(name, "DingValue"); // track as struct pointer
     return lines.join("\n");
   }
 
@@ -315,7 +343,6 @@ export class CEmitter {
     const id = node.identifier;
     const start = this.emitAs(node.start, "ding_int");
     const end = this.emitAs(node.end, "ding_int");
-    this.variableTypes.set(id, "ding_int");
     const body = this.emitBlock(node.body);
     return `${this.pad()}for (ding_int ${id} = ${start}; ${id} < ${end}; ${id}++) {\n${body}\n${this.pad()}}`;
   }
@@ -405,11 +432,7 @@ export class CEmitter {
       .map(([pName, cType]) => `${cType} ${pName}`)
       .join(", ");
 
-    // Register param types
     const savedReturnType = this.currentReturnType;
-    for (const [pName, cType] of paramTypes) {
-      this.variableTypes.set(pName, cType as CType);
-    }
 
     const lines: string[] = [];
 
@@ -438,12 +461,7 @@ export class CEmitter {
       lines.push("}");
     }
 
-    // Restore scope
     this.currentReturnType = savedReturnType;
-    for (const [pName] of paramTypes) {
-      this.variableTypes.delete(pName);
-    }
-
     return lines.join("\n");
   }
 
@@ -453,6 +471,14 @@ export class CEmitter {
       if (stmt.type === "IfStatement") {
         if (this.blockHasReturn(stmt.consequent)) return true;
         if (stmt.alternate && this.blockHasReturn(stmt.alternate)) return true;
+      }
+      if (stmt.type === "TryCatchStatement") {
+        if (this.blockHasReturn(stmt.body)) return true;
+        if (this.blockHasReturn(stmt.catch)) return true;
+        if (stmt.finally && this.blockHasReturn(stmt.finally)) return true;
+      }
+      if (stmt.type === "ForRangeStatement" || stmt.type === "ForInStatement" || stmt.type === "WhileStatement") {
+        if (this.blockHasReturn(stmt.body)) return true;
       }
     }
     return false;
@@ -487,12 +513,8 @@ export class CEmitter {
       retType = "DingValue";
     }
 
-    // Register param types in scope and set return type context
     const savedReturnType = this.currentReturnType;
     this.currentReturnType = retType;
-    for (const [pName, cType] of paramTypes) {
-      this.variableTypes.set(pName, cType);
-    }
 
     const lines: string[] = [];
     lines.push(`${retType} ding_fn_${name}(${params}) {`);
@@ -516,12 +538,7 @@ export class CEmitter {
 
     lines.push("}");
 
-    // Restore scope
     this.currentReturnType = savedReturnType;
-    for (const [pName] of paramTypes) {
-      this.variableTypes.delete(pName);
-    }
-
     return lines.join("\n");
   }
 
@@ -538,7 +555,7 @@ export class CEmitter {
       case "NullLiteral":
         return "DING_VALUE_NULL";
       case "Identifier":
-        return this.emitIdentifier(node.name);
+        return this.emitIdentifier(node);
       case "BinaryExpression":
         return this.emitBinaryExpression(node);
       case "ArrowFunction":
@@ -580,16 +597,39 @@ export class CEmitter {
     }
   }
 
-  private emitIdentifier(name: string): string {
+  private emitIdentifier(node: { name: string; type: "Identifier" }): string {
+    const name = node.name;
     // Check stdlib renames
     if (this.stdRenames.has(name)) return this.stdRenames.get(name)!;
     if (this.mathRenames.has(name)) return this.mathRenames.get(name)!;
     // Check if it's a known top-level function
     if (this.functions.has(name)) return `ding_fn_${name}`;
+    // Global reference? The resolver recorded this specifically when it
+    // walked this exact node with no local of the same name in scope.
+    // A local variable that happens to share a name with a global will
+    // NOT appear in globalRefs, so shadowing is handled correctly.
+    if (this.resolver.globalRefs.has(node)) return `${GLOBAL_PREFIX}${name}`;
     return name;
   }
 
   private emitBinaryExpression(node: BinaryExpression): string {
+    // Null comparison: lower to tag-field check on DingValue, or NULL pointer check otherwise.
+    if (node.operator === "==" || node.operator === "!=") {
+      const leftIsNull = node.left.type === "NullLiteral";
+      const rightIsNull = node.right.type === "NullLiteral";
+      if (leftIsNull || rightIsNull) {
+        const other = leftIsNull ? node.right : node.left;
+        const otherType = this.resolveType(other);
+        const otherExpr = this.emitExpression(other);
+        const op = node.operator === "==" ? "==" : "!=";
+        if (otherType === "DingValue") {
+          return `${otherExpr}.type ${op} DING_NULL`;
+        }
+        // Pointer-ish types: DingArray*, struct pointers, strings
+        return `${otherExpr} ${op} NULL`;
+      }
+    }
+
     const leftType = this.resolveType(node.left);
     const rightType = this.resolveType(node.right);
 
@@ -626,67 +666,72 @@ export class CEmitter {
   }
 
   private emitCallExpression(node: CallExpression): string {
-    // Method call: obj.method(args) → StructName_method(obj, args)
+    // Method call: obj.method(args)
     if (node.callee.type === "MemberExpression") {
-      const obj = this.emitExpression(node.callee.object);
       const method = node.callee.property;
-      const args = node.arguments.map((a) => this.emitExpression(a));
+      const receiverType = this.resolveType(node.callee.object);
+      const obj = this.emitExpression(node.callee.object);
 
-      // Check if it's a known struct method
-      // Try to find the struct this object belongs to by checking known variables
-      const objName = node.callee.object.type === "Identifier" ? node.callee.object.name : null;
-      if (objName) {
-        // Look through structs for a matching method
+      // Array methods — lower to ding_array_* runtime calls.
+      // Unwrap the receiver if it's a DingValue.
+      if (receiverType === "DingArray*" || receiverType === "DingValue") {
+        const arrExpr = receiverType === "DingValue" ? `${obj}.as_array` : obj;
+        if (method === "push") {
+          if (node.arguments.length !== 1) {
+            throw new DingError("emitter", `array.push expects 1 argument, got ${node.arguments.length}`);
+          }
+          const argExpr = this.emitExpression(node.arguments[0]);
+          const argType = this.resolveType(node.arguments[0]);
+          const wrapped = wrapAsDingValue(argExpr, argType);
+          return `ding_array_push(${arrExpr}, ${wrapped})`;
+        }
+      }
+
+      // Struct method: look up by the receiver's struct type when known.
+      // receiverType may be "Player*" for a struct pointer variable.
+      let ownerStruct: string | null = null;
+      if (typeof receiverType === "string" && receiverType.endsWith("*")) {
+        const base = receiverType.slice(0, -1);
+        if (this.structs.has(base)) ownerStruct = base;
+      }
+      if (!ownerStruct) {
+        // Fallback: search any struct that defines this method name.
         for (const [structName, decl] of this.structs) {
-          const hasMethod = decl.methods.some((m) => m.name === method);
-          if (hasMethod) {
-            return `${structName}_${method}(${[obj, ...args].join(", ")})`;
+          if (decl.methods.some((m) => m.name === method)) {
+            ownerStruct = structName;
+            break;
           }
         }
+      }
+      if (ownerStruct) {
+        const args = node.arguments.map((a) => this.emitExpression(a));
+        return `${ownerStruct}_${method}(${[obj, ...args].join(", ")})`;
       }
 
       // Fallback: generic method call
+      const args = node.arguments.map((a) => this.emitExpression(a));
       return `${obj}_${method}(${args.join(", ")})`;
     }
 
-    const callee = this.emitExpression(node.callee);
-
-    // Determine expected param types for the callee
-    let expectedParamTypes: (CType | null)[] | null = null;
-    if (node.callee.type === "Identifier") {
-      const fnInfo = this.functions.get(node.callee.name);
-      if (fnInfo) {
-        expectedParamTypes = fnInfo.params.map((p) =>
-          p.annotation ? mapAnnotationToCType(p.annotation) : "DingValue" as CType
-        );
-      }
+    // Data-driven lowering via the resolver's precomputed call target.
+    // The resolver already knows what we're calling and its parameter
+    // types; we just emit the arguments and coerce each to the expected
+    // C type. This replaces the old hard-coded `isStdLogFunction` check
+    // and guarantees every callee goes through the same path.
+    const target = this.resolver.callTargetOf(node);
+    if (target && target.kind !== "array-builtin") {
+      const args = node.arguments.map((a, i) => {
+        const expected = target.paramTypes[i] ?? "DingValue";
+        return this.emitAs(a, expected);
+      });
+      return `${target.cName}(${args.join(", ")})`;
     }
 
-    const args = node.arguments.map((a, i) => {
-      const expr = this.emitExpression(a);
-      // For ding_log and similar, wrap arguments as DingValue
-      if (this.isStdLogFunction(callee)) {
-        const argType = this.resolveType(a);
-        return wrapAsDingValue(expr, argType);
-      }
-      // For user-defined functions with DingValue params, wrap typed args
-      if (expectedParamTypes && i < expectedParamTypes.length) {
-        const expected = expectedParamTypes[i];
-        if (expected === "DingValue") {
-          const argType = this.resolveType(a);
-          if (argType !== "DingValue") {
-            return wrapAsDingValue(expr, argType);
-          }
-        }
-      }
-      return expr;
-    });
-
+    // Fallback for calls the resolver couldn't identify (e.g. calls on
+    // a value that isn't a known identifier — rare).
+    const callee = this.emitExpression(node.callee);
+    const args = node.arguments.map((a) => this.emitExpression(a));
     return `${callee}(${args.join(", ")})`;
-  }
-
-  private isStdLogFunction(callee: string): boolean {
-    return callee === "ding_log" || callee === "ding_warn" || callee === "ding_error";
   }
 
   private emitTemplateLiteral(node: TemplateLiteral): string {
@@ -726,8 +771,10 @@ export class CEmitter {
   }
 
   private emitArrayAccess(node: ArrayAccess): string {
-    const arr = this.emitExpression(node.array);
-    const idx = this.emitExpression(node.index);
+    const arrType = this.resolveType(node.array);
+    const arrExpr = this.emitExpression(node.array);
+    const arr = arrType === "DingValue" ? `${arrExpr}.as_array` : arrExpr;
+    const idx = this.emitAs(node.index, "ding_int");
     return `ding_array_get(${arr}, ${idx})`;
   }
 
@@ -767,12 +814,13 @@ export class CEmitter {
   }
 
   private emitNullishCoalescing(node: NullishCoalescing): string {
+    const leftType = this.resolveType(node.left);
     const left = this.emitExpression(node.left);
-    const right = this.emitExpression(node.right);
-    const leftType = inferCType(node.left);
     if (leftType === "DingValue") {
+      const right = this.emitAs(node.right, "DingValue");
       return `(${left}.type != DING_NULL ? ${left} : ${right})`;
     }
+    const right = this.emitExpression(node.right);
     return `(${left} != NULL ? ${left} : ${right})`;
   }
 
@@ -808,12 +856,11 @@ export class CEmitter {
 
   // ── Type resolution ─────────────────────────────────────────────────
 
-  /** Resolve the C type of an expression using scope + inference */
+  /** Resolve the C type of an expression using the resolver, with a small fallback. */
   private resolveType(node: Expression): CType {
-    if (node.type === "Identifier") {
-      const known = this.variableTypes.get(node.name);
-      if (known) return known;
-    }
+    // Resolver is authoritative for any node it walked during the pre-pass.
+    const fromResolver = this.resolver.exprTypes.get(node);
+    if (fromResolver) return fromResolver;
     if (node.type === "CallExpression" && node.callee.type === "Identifier") {
       const fn = this.functions.get(node.callee.name);
       if (fn?.returnType) return fn.returnType;
@@ -868,8 +915,24 @@ export class CEmitter {
     }
     // Wrap primitive → DingValue
     if (target === "DingValue" && actual !== "DingValue") return wrapAsDingValue(expr, actual);
-    // Numeric narrowing/widening casts between concrete types
-    if (isNumericType(actual) && isNumericType(target)) return `(${target})(${expr})`;
+    // Numeric narrowing/widening casts between concrete types —
+    // but skip the cast when the two types are equivalent under the
+    // hood: ding_int ↔ ding_int64 (both int64_t), ding_float ↔ ding_float64
+    // (both double). Avoids uglifying the emitted C with redundant casts.
+    if (isNumericType(actual) && isNumericType(target)) {
+      if (areEquivalentNumeric(actual, target)) return expr;
+      return `(${target})(${expr})`;
+    }
     return expr;
   }
+}
+
+/** True when two numeric CTypes are the same underlying C type, so a cast
+ *  between them is a no-op. Keeps emitted C clean. */
+function areEquivalentNumeric(a: CType, b: CType): boolean {
+  const intDefaults = new Set<CType>(["ding_int", "ding_int64"]);
+  const floatDefaults = new Set<CType>(["ding_float", "ding_float64"]);
+  if (intDefaults.has(a) && intDefaults.has(b)) return true;
+  if (floatDefaults.has(a) && floatDefaults.has(b)) return true;
+  return false;
 }

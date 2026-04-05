@@ -98,6 +98,8 @@ export function inferCType(expr: Expression): CType {
     }
     case "StructInstantiation":
       return "DingValue";
+    case "LengthExpression":
+      return "ding_int";
     default:
       return "DingValue";
   }

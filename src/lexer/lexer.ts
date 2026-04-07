@@ -24,6 +24,10 @@ const KEYWORDS: Record<string, TokenType> = {
   throw: TokenType.Throw,
   finally: TokenType.Finally,
   as: TokenType.As,
+  enum: TokenType.Enum,
+  match: TokenType.Match,
+  spawn: TokenType.Spawn,
+  type: TokenType.Type,
 };
 
 export class Lexer {
@@ -256,6 +260,10 @@ export class Lexer {
         return { type: TokenType.QuestionMark, value: "?", line: startLine, col: startCol };
       case ".":
         if (next === ".") {
+          if (this.pos + 2 < this.source.length && this.source[this.pos + 2] === ".") {
+            this.advance(); this.advance(); this.advance();
+            return { type: TokenType.DotDotDot, value: "...", line: startLine, col: startCol };
+          }
           this.advance(); this.advance();
           return { type: TokenType.DotDot, value: "..", line: startLine, col: startCol };
         }
@@ -265,6 +273,10 @@ export class Lexer {
         this.advance();
         return { type: TokenType.Hash, value: "#", line: startLine, col: startCol };
       case "<":
+        if (next === "<") {
+          this.advance(); this.advance();
+          return { type: TokenType.LeftShift, value: "<<", line: startLine, col: startCol };
+        }
         if (next === "=") {
           this.advance(); this.advance();
           return { type: TokenType.LessThanEquals, value: "<=", line: startLine, col: startCol };
@@ -272,20 +284,83 @@ export class Lexer {
         this.advance();
         return { type: TokenType.LessThan, value: "<", line: startLine, col: startCol };
       case ">":
+        if (next === ">") {
+          this.advance(); this.advance();
+          return { type: TokenType.RightShift, value: ">>", line: startLine, col: startCol };
+        }
         if (next === "=") {
           this.advance(); this.advance();
           return { type: TokenType.GreaterThanEquals, value: ">=", line: startLine, col: startCol };
         }
         this.advance();
         return { type: TokenType.GreaterThan, value: ">", line: startLine, col: startCol };
+      case "&":
+        if (next === "&") {
+          this.advance(); this.advance();
+          return { type: TokenType.And, value: "&&", line: startLine, col: startCol };
+        }
+        this.advance();
+        return { type: TokenType.Ampersand, value: "&", line: startLine, col: startCol };
+      case "|":
+        if (next === "|") {
+          this.advance(); this.advance();
+          return { type: TokenType.Or, value: "||", line: startLine, col: startCol };
+        }
+        if (next === ">") {
+          this.advance(); this.advance();
+          return { type: TokenType.PipeGreater, value: "|>", line: startLine, col: startCol };
+        }
+        this.advance();
+        return { type: TokenType.Pipe, value: "|", line: startLine, col: startCol };
+      case "^":
+        this.advance();
+        return { type: TokenType.Caret, value: "^", line: startLine, col: startCol };
+      case "~":
+        this.advance();
+        return { type: TokenType.Tilde, value: "~", line: startLine, col: startCol };
+      case "+":
+        if (next === "=") {
+          this.advance(); this.advance();
+          return { type: TokenType.PlusEquals, value: "+=", line: startLine, col: startCol };
+        }
+        this.advance();
+        return { type: TokenType.Plus, value: "+", line: startLine, col: startCol };
+      case "-":
+        if (next === "=") {
+          this.advance(); this.advance();
+          return { type: TokenType.MinusEquals, value: "-=", line: startLine, col: startCol };
+        }
+        this.advance();
+        return { type: TokenType.Minus, value: "-", line: startLine, col: startCol };
+      case "*":
+        if (next === "*") {
+          this.advance(); this.advance();
+          return { type: TokenType.StarStar, value: "**", line: startLine, col: startCol };
+        }
+        if (next === "=") {
+          this.advance(); this.advance();
+          return { type: TokenType.StarEquals, value: "*=", line: startLine, col: startCol };
+        }
+        this.advance();
+        return { type: TokenType.Star, value: "*", line: startLine, col: startCol };
+      case "/":
+        if (next === "=") {
+          this.advance(); this.advance();
+          return { type: TokenType.SlashEquals, value: "/=", line: startLine, col: startCol };
+        }
+        this.advance();
+        return { type: TokenType.Slash, value: "/", line: startLine, col: startCol };
+      case "%":
+        if (next === "=") {
+          this.advance(); this.advance();
+          return { type: TokenType.PercentEquals, value: "%=", line: startLine, col: startCol };
+        }
+        this.advance();
+        return { type: TokenType.Percent, value: "%", line: startLine, col: startCol };
     }
 
     // Single-character operators and delimiters
     const singleCharTokens: Record<string, TokenType> = {
-      "+": TokenType.Plus,
-      "-": TokenType.Minus,
-      "*": TokenType.Star,
-      "/": TokenType.Slash,
       "(": TokenType.LeftParen,
       ")": TokenType.RightParen,
       "{": TokenType.LeftBrace,

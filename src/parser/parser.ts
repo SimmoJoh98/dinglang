@@ -34,6 +34,17 @@ import type {
   NullishCoalescing,
   NullAssertion,
   AssignmentExpression,
+  UnaryExpression,
+  EnumDeclaration,
+  MatchExpression,
+  MatchArm,
+  MatchPattern,
+  MatchStatement,
+  SpreadElement,
+  DestructuringDeclaration,
+  MapLiteral,
+  SpawnStatement,
+  TypeAliasDeclaration,
 } from "../ast/nodes.js";
 
 export class Parser {
@@ -137,13 +148,32 @@ export class Parser {
         return this.parseTryCatchStatement();
       case TokenType.Throw:
         return this.parseThrowStatement();
+      case TokenType.Enum:
+        return this.parseEnumDeclaration();
+      case TokenType.Match:
+        return this.parseMatchStatement();
+      case TokenType.Spawn:
+        return this.parseSpawnStatement();
+      case TokenType.Type:
+        return this.parseTypeAlias();
       default:
         return this.parseExpressionStatement();
     }
   }
 
-  private parseVariableDeclaration(): VariableDeclaration {
+  private parseVariableDeclaration(): VariableDeclaration | DestructuringDeclaration {
     const kind = this.advance().value as "const" | "let";
+
+    // Array destructuring: const [a, b, c] = expr
+    if (this.current().type === TokenType.LeftBracket) {
+      return this.parseArrayDestructuring(kind);
+    }
+
+    // Object destructuring: const { x, y } = expr
+    if (this.current().type === TokenType.LeftBrace) {
+      return this.parseObjectDestructuring(kind);
+    }
+
     const name = this.expect(TokenType.Identifier).value;
 
     let annotation: TypeAnnotation | undefined;
@@ -156,6 +186,64 @@ export class Parser {
     this.skipSemicolons();
 
     return { type: "VariableDeclaration", kind, name, annotation, init };
+  }
+
+  private parseArrayDestructuring(kind: "const" | "let"): DestructuringDeclaration {
+    this.expect(TokenType.LeftBracket);
+    const elements: (string | null)[] = [];
+    while (this.current().type !== TokenType.RightBracket) {
+      if (this.current().type === TokenType.Comma) {
+        elements.push(null); // skipped position
+      } else {
+        elements.push(this.expect(TokenType.Identifier).value);
+      }
+      if (!this.match(TokenType.Comma)) break;
+    }
+    this.expect(TokenType.RightBracket);
+    this.expect(TokenType.Equals);
+    const init = this.parseExpression();
+    this.skipSemicolons();
+    return {
+      type: "DestructuringDeclaration",
+      kind,
+      pattern: { kind: "array", elements },
+      init,
+    };
+  }
+
+  private parseTypeAlias(): TypeAliasDeclaration {
+    this.expect(TokenType.Type); // consume 'type'
+    const name = this.expect(TokenType.Identifier).value;
+    this.expect(TokenType.Equals);
+    const alias = this.parseTypeAnnotation();
+    this.skipSemicolons();
+    return { type: "TypeAliasDeclaration", name, alias } as TypeAliasDeclaration;
+  }
+
+  private parseSpawnStatement(): SpawnStatement {
+    this.expect(TokenType.Spawn); // consume 'spawn'
+    const body = this.parseExpression();
+    this.skipSemicolons();
+    return { type: "SpawnStatement", body } as SpawnStatement;
+  }
+
+  private parseObjectDestructuring(kind: "const" | "let"): DestructuringDeclaration {
+    this.expect(TokenType.LeftBrace);
+    const properties: string[] = [];
+    while (this.current().type !== TokenType.RightBrace) {
+      properties.push(this.expect(TokenType.Identifier).value);
+      if (!this.match(TokenType.Comma)) break;
+    }
+    this.expect(TokenType.RightBrace);
+    this.expect(TokenType.Equals);
+    const init = this.parseExpression();
+    this.skipSemicolons();
+    return {
+      type: "DestructuringDeclaration",
+      kind,
+      pattern: { kind: "object", properties },
+      init,
+    };
   }
 
   private parseImportDeclaration(): ImportDeclaration {
@@ -315,7 +403,11 @@ export class Parser {
           if (this.match(TokenType.Colon)) {
             annotation = this.parseTypeAnnotation();
           }
-          params.push({ name: pName, annotation });
+          let defaultValue: Expression | undefined;
+          if (this.match(TokenType.Equals)) {
+            defaultValue = this.parseExpression();
+          }
+          params.push({ name: pName, annotation, defaultValue });
           if (!this.match(TokenType.Comma)) break;
         }
         this.expect(TokenType.RightParen);
@@ -411,23 +503,47 @@ export class Parser {
   // ── Expressions (precedence climbing) ──────────────────────────────
   //
   // Precedence (low → high):
-  //  1. Assignment (=)
-  //  2. Nullish   (??)
-  //  3. Equality  (== !=)
-  //  4. Comparison (< > <= >=)
-  //  5. Additive  (+ -)
-  //  6. Multiplicative (* /)
-  //  7. Unary     (! - #)
-  //  8. Postfix   (? !)
-  //  9. Call/Member (f() . ?. [])
-  // 10. Primary   (literals, identifiers, parens, arrays)
+  //  1. Assignment  (= += -= *= /= %=)
+  //  2. Pipe        (|>)
+  //  3. Logical OR  (||)
+  //  4. Logical AND (&&)
+  //  5. Nullish     (??)
+  //  6. Equality    (== !=)
+  //  7. Comparison  (< > <= >=)
+  //  8. Bitwise OR  (|)
+  //  9. Bitwise XOR (^)
+  // 10. Bitwise AND (&)
+  // 11. Shift       (<< >>)
+  // 12. Additive    (+ -)
+  // 13. Multiplicative (* / %)
+  // 14. Exponentiation (**)  — right-associative
+  // 15. Unary       (! - # ~)
+  // 16. Postfix     (? !)
+  // 17. Call/Member  (f() . ?. [])
+  // 18. Primary     (literals, identifiers, parens, arrays, match)
 
   parseExpression(): Expression {
     return this.parseAssignment();
   }
 
   private parseAssignment(): Expression {
-    const expr = this.parseNullish();
+    const expr = this.parsePipe();
+
+    // Compound assignment: desugar x += y into x = x + y
+    const compoundOps: Record<string, string> = {
+      [TokenType.PlusEquals]: "+",
+      [TokenType.MinusEquals]: "-",
+      [TokenType.StarEquals]: "*",
+      [TokenType.SlashEquals]: "/",
+      [TokenType.PercentEquals]: "%",
+    };
+    const compoundOp = compoundOps[this.current().type];
+    if (compoundOp) {
+      this.advance();
+      const right = this.parseAssignment();
+      const value = { type: "BinaryExpression", operator: compoundOp, left: expr, right } as Expression;
+      return { type: "AssignmentExpression", target: expr, value } as AssignmentExpression;
+    }
 
     if (this.current().type === TokenType.Equals) {
       // Make sure it's not == or =>
@@ -439,6 +555,42 @@ export class Parser {
     }
 
     return expr;
+  }
+
+  private parsePipe(): Expression {
+    let left = this.parseOr();
+    while (this.current().type === TokenType.PipeGreater) {
+      this.advance(); // consume |>
+      const right = this.parseOr();
+      // Desugar: a |> f(b) → f(a, b), a |> f → f(a)
+      if (right.type === "CallExpression") {
+        right.arguments.unshift(left);
+        left = right;
+      } else {
+        left = { type: "CallExpression", callee: right, arguments: [left] } as CallExpression;
+      }
+    }
+    return left;
+  }
+
+  private parseOr(): Expression {
+    let left = this.parseAnd();
+    while (this.current().type === TokenType.Or) {
+      const operator = this.advance().value;
+      const right = this.parseAnd();
+      left = { type: "BinaryExpression", operator, left, right };
+    }
+    return left;
+  }
+
+  private parseAnd(): Expression {
+    let left = this.parseNullish();
+    while (this.current().type === TokenType.And) {
+      const operator = this.advance().value;
+      const right = this.parseNullish();
+      left = { type: "BinaryExpression", operator, left, right };
+    }
+    return left;
   }
 
   private parseNullish(): Expression {
@@ -465,12 +617,55 @@ export class Parser {
   }
 
   private parseComparison(): Expression {
-    let left = this.parseAdditive();
+    let left = this.parseBitwiseOr();
     while (
       this.current().type === TokenType.LessThan ||
       this.current().type === TokenType.LessThanEquals ||
       this.current().type === TokenType.GreaterThan ||
       this.current().type === TokenType.GreaterThanEquals
+    ) {
+      const operator = this.advance().value;
+      const right = this.parseBitwiseOr();
+      left = { type: "BinaryExpression", operator, left, right };
+    }
+    return left;
+  }
+
+  private parseBitwiseOr(): Expression {
+    let left = this.parseBitwiseXor();
+    while (this.current().type === TokenType.Pipe) {
+      const operator = this.advance().value;
+      const right = this.parseBitwiseXor();
+      left = { type: "BinaryExpression", operator, left, right };
+    }
+    return left;
+  }
+
+  private parseBitwiseXor(): Expression {
+    let left = this.parseBitwiseAnd();
+    while (this.current().type === TokenType.Caret) {
+      const operator = this.advance().value;
+      const right = this.parseBitwiseAnd();
+      left = { type: "BinaryExpression", operator, left, right };
+    }
+    return left;
+  }
+
+  private parseBitwiseAnd(): Expression {
+    let left = this.parseShift();
+    while (this.current().type === TokenType.Ampersand) {
+      const operator = this.advance().value;
+      const right = this.parseShift();
+      left = { type: "BinaryExpression", operator, left, right };
+    }
+    return left;
+  }
+
+  private parseShift(): Expression {
+    let left = this.parseAdditive();
+    while (
+      this.current().type === TokenType.LeftShift ||
+      this.current().type === TokenType.RightShift
     ) {
       const operator = this.advance().value;
       const right = this.parseAdditive();
@@ -493,14 +688,25 @@ export class Parser {
   }
 
   private parseMultiplicative(): Expression {
-    let left = this.parseUnary();
+    let left = this.parseExponentiation();
     while (
       this.current().type === TokenType.Star ||
-      this.current().type === TokenType.Slash
+      this.current().type === TokenType.Slash ||
+      this.current().type === TokenType.Percent
     ) {
       const operator = this.advance().value;
-      const right = this.parseUnary();
+      const right = this.parseExponentiation();
       left = { type: "BinaryExpression", operator, left, right };
+    }
+    return left;
+  }
+
+  private parseExponentiation(): Expression {
+    const left = this.parseUnary();
+    if (this.current().type === TokenType.StarStar) {
+      this.advance();
+      const right = this.parseExponentiation(); // right-associative
+      return { type: "BinaryExpression", operator: "**", left, right };
     }
     return left;
   }
@@ -511,6 +717,25 @@ export class Parser {
       this.advance();
       const target = this.parsePostfix();
       return { type: "LengthExpression", target } as LengthExpression;
+    }
+    // ~ prefix (bitwise NOT)
+    if (this.current().type === TokenType.Tilde) {
+      const operator = this.advance().value;
+      const operand = this.parseUnary();
+      return { type: "UnaryExpression", operator, operand } as UnaryExpression;
+    }
+    // Unary minus
+    if (this.current().type === TokenType.Minus) {
+      const operator = this.advance().value;
+      const operand = this.parseUnary();
+      return { type: "UnaryExpression", operator, operand } as UnaryExpression;
+    }
+    // Logical NOT
+    if (this.current().type === TokenType.Bang) {
+      // Only treat as unary NOT if not followed by = (which is !=, already handled)
+      const operator = this.advance().value;
+      const operand = this.parseUnary();
+      return { type: "UnaryExpression", operator, operand } as UnaryExpression;
     }
     return this.parsePostfix();
   }
@@ -601,6 +826,17 @@ export class Parser {
         return { type: "NullLiteral" };
 
       case TokenType.Identifier: {
+        // Map literal: Map { "key": value, ... }
+        if (token.value === "Map" && this.peek(1).type === TokenType.LeftBrace) {
+          // Distinguish from struct named Map: if next-next is } or string literal, it's a map
+          const afterBrace = this.peek(2);
+          if (
+            afterBrace.type === TokenType.RightBrace ||
+            afterBrace.type === TokenType.String
+          ) {
+            return this.parseMapLiteral();
+          }
+        }
         // Check if this is a struct instantiation: Identifier '{' ...
         // Heuristic: uppercase first letter + followed by {
         if (
@@ -623,6 +859,9 @@ export class Parser {
       case TokenType.LeftBracket:
         return this.parseArrayLiteral();
 
+      case TokenType.Match:
+        return this.parseMatchExpression();
+
       default:
         throw new DingError("parser", `Unexpected token ${token.type} ("${token.value}")`, {
           line: token.line,
@@ -637,13 +876,36 @@ export class Parser {
 
   private parseArrayLiteral(): ArrayLiteral {
     this.expect(TokenType.LeftBracket);
-    const elements: Expression[] = [];
+    const elements: (Expression | SpreadElement)[] = [];
     while (this.current().type !== TokenType.RightBracket) {
-      elements.push(this.parseExpression());
+      if (this.current().type === TokenType.DotDotDot) {
+        this.advance(); // consume ...
+        const argument = this.parseExpression();
+        elements.push({ type: "SpreadElement", argument } as SpreadElement);
+      } else {
+        elements.push(this.parseExpression());
+      }
       if (!this.match(TokenType.Comma)) break;
     }
     this.expect(TokenType.RightBracket);
     return { type: "ArrayLiteral", elements };
+  }
+
+  // ── Map literal ────────────────────────────────────────────────────
+
+  private parseMapLiteral(): MapLiteral {
+    this.expect(TokenType.Identifier); // consume "Map"
+    this.expect(TokenType.LeftBrace);
+    const entries: { key: Expression; value: Expression }[] = [];
+    while (this.current().type !== TokenType.RightBrace) {
+      const key = this.parseExpression();
+      this.expect(TokenType.Colon);
+      const value = this.parseExpression();
+      entries.push({ key, value });
+      if (!this.match(TokenType.Comma)) break;
+    }
+    this.expect(TokenType.RightBrace);
+    return { type: "MapLiteral", entries };
   }
 
   // ── Struct instantiation ───────────────────────────────────────────
@@ -710,7 +972,11 @@ export class Parser {
       if (this.match(TokenType.Colon)) {
         annotation = this.parseTypeAnnotation();
       }
-      params.push({ name: pName, annotation });
+      let defaultValue: Expression | undefined;
+      if (this.match(TokenType.Equals)) {
+        defaultValue = this.parseExpression();
+      }
+      params.push({ name: pName, annotation, defaultValue });
       if (!this.match(TokenType.Comma)) break;
     }
 
@@ -725,6 +991,92 @@ export class Parser {
     }
 
     return { type: "ArrowFunction", params, body };
+  }
+
+  // ── Enum declaration ────────────────────────────────────────────────
+
+  private parseEnumDeclaration(): EnumDeclaration {
+    this.expect(TokenType.Enum);
+    const name = this.expect(TokenType.Identifier).value;
+    this.expect(TokenType.LeftBrace);
+
+    const members: { name: string; value?: Expression }[] = [];
+    while (this.current().type !== TokenType.RightBrace) {
+      this.skipSemicolons();
+      if (this.current().type === TokenType.RightBrace) break;
+      const memberName = this.expect(TokenType.Identifier).value;
+      let value: Expression | undefined;
+      if (this.match(TokenType.Equals)) {
+        value = this.parseExpression();
+      }
+      members.push({ name: memberName, value });
+      if (this.current().type === TokenType.Comma) this.advance();
+      this.skipSemicolons();
+    }
+
+    this.expect(TokenType.RightBrace);
+    return { type: "EnumDeclaration", name, members };
+  }
+
+  // ── Match statement / expression ──────────────────────────────────
+
+  private parseMatchStatement(): MatchStatement {
+    const { subject, arms } = this.parseMatchCommon();
+    return { type: "MatchStatement", subject, arms };
+  }
+
+  private parseMatchExpression(): MatchExpression {
+    const { subject, arms } = this.parseMatchCommon();
+    return { type: "MatchExpression", subject, arms };
+  }
+
+  private parseMatchCommon(): { subject: Expression; arms: MatchArm[] } {
+    this.expect(TokenType.Match);
+    this.expect(TokenType.LeftParen);
+    const subject = this.parseExpression();
+    this.expect(TokenType.RightParen);
+    this.expect(TokenType.LeftBrace);
+
+    const arms: MatchArm[] = [];
+    while (this.current().type !== TokenType.RightBrace) {
+      this.skipSemicolons();
+      if (this.current().type === TokenType.RightBrace) break;
+
+      // Parse pattern
+      let pattern: MatchPattern;
+      if (this.current().type === TokenType.Identifier && this.current().value === "_") {
+        this.advance();
+        pattern = { kind: "wildcard" };
+      } else {
+        const value = this.parseExpression();
+        // Check for range pattern: expr..expr
+        if (this.current().type === TokenType.DotDot) {
+          this.advance();
+          const end = this.parseExpression();
+          pattern = { kind: "range", start: value, end };
+        } else {
+          pattern = { kind: "literal", value };
+        }
+      }
+
+      this.expect(TokenType.Arrow);
+
+      // Parse body: block or single expression
+      let body: Statement[] | Expression;
+      if (this.current().type === TokenType.LeftBrace) {
+        body = this.parseBlock();
+      } else {
+        body = this.parseExpression();
+      }
+
+      arms.push({ pattern, body });
+
+      if (this.current().type === TokenType.Comma) this.advance();
+      this.skipSemicolons();
+    }
+
+    this.expect(TokenType.RightBrace);
+    return { subject, arms };
   }
 
   // ── Template literal re-parsing ────────────────────────────────────

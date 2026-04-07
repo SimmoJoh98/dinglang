@@ -1,6 +1,12 @@
 # Ding Language Specification
 
-> Version 0.3.0 — Draft
+> Version 0.4.0 — Draft
+
+## Vision
+
+**As safe and easy to use as Lua/Python. As performant as C.**
+
+Ding occupies the sweet spot between scripting-language ergonomics and systems-language performance. It should feel like writing Python or Lua — obvious syntax, helpful errors, batteries included — while compiling to C for native speed with zero garbage collection overhead.
 
 ## Overview
 
@@ -422,6 +428,134 @@ extern fn malloc(size: number): any
 */
 ```
 
+## Logical Operators
+
+Logical AND (`&&`) and OR (`||`) with short-circuit evaluation:
+
+```
+if (x > 0 && y < 10) { log("both") }
+if (a || b) { log("either") }
+```
+
+## Modulo and Bitwise Operators
+
+```
+const remainder = 17 % 5       // 2
+const masked = 255 & 0x0F      // 15
+const combined = a | b          // bitwise OR
+const flipped = ~x              // bitwise NOT
+const shifted = 1 << 4          // 16
+const xored = a ^ b             // XOR
+const rshifted = x >> 1         // right shift
+```
+
+## Compound Assignment
+
+```
+x += 5
+x -= 1
+x *= 2
+x /= 3
+x %= 2
+```
+
+Compound assignments desugar to `x = x op value` at parse time.
+
+## Unary Operators
+
+```
+const neg = -x          // negation
+const not = !flag       // logical NOT
+const inv = ~bits       // bitwise NOT
+const len = #array      // length
+```
+
+## Default Parameters
+
+```
+const greet = (name: string, greeting: string = "Hello") => {
+  log(`${greeting}, ${name}!`)
+}
+greet("Alice")           // "Hello, Alice!"
+greet("Bob", "Hey")      // "Hey, Bob!"
+```
+
+## Enums
+
+```
+enum Color {
+  Red,
+  Green,
+  Blue
+}
+
+enum HttpStatus {
+  Ok = 200,
+  NotFound = 404,
+  ServerError = 500
+}
+
+const c = Color.Red              // 0
+const status = HttpStatus.NotFound  // 404
+```
+
+Enum members are integers. Without explicit values they auto-increment from 0.
+
+## Match
+
+Match expressions evaluate a subject against a series of patterns:
+
+```
+match (status) {
+  200 => log("OK"),
+  404 => log("Not Found"),
+  _ => log("Unknown")
+}
+```
+
+Patterns support literals, ranges, and wildcards:
+
+```
+match (score) {
+  0..50 => log("Low"),       // range: 0 <= score < 50
+  50..100 => log("High"),
+  _ => log("Out of range")   // wildcard: default case
+}
+```
+
+Match can also be used as an expression:
+
+```
+const label = match (code) {
+  200 => "ok",
+  404 => "not found",
+  _ => "unknown"
+}
+```
+
+## String Methods
+
+Strings support built-in methods:
+
+| Method | Signature | Description |
+|---|---|---|
+| `indexOf` | `(needle: string) => number` | Index of first occurrence (-1 if not found) |
+| `includes` | `(needle: string) => bool` | Whether string contains needle |
+| `startsWith` | `(prefix: string) => bool` | Whether string starts with prefix |
+| `endsWith` | `(suffix: string) => bool` | Whether string ends with suffix |
+| `slice` | `(start: number, end: number) => string` | Substring extraction |
+| `trim` | `() => string` | Remove leading/trailing whitespace |
+| `toUpperCase` | `() => string` | Convert to uppercase |
+| `toLowerCase` | `() => string` | Convert to lowercase |
+| `split` | `(delim: string) => string[]` | Split into array |
+| `replace` | `(old: string, new: string) => string` | Replace first occurrence |
+
+```
+const upper = name.toUpperCase()
+const parts = csv.split(",")
+const has = name.includes("ding")
+```
+
 ## Reserved Keywords
 
 ```
@@ -431,6 +565,7 @@ true false
 for while in break continue
 struct self
 try catch throw finally
+enum match
 ```
 
 ## Standard Library
@@ -486,16 +621,22 @@ From lowest to highest:
 
 | Precedence | Operators | Description |
 |---|---|---|
-| 1 | `=` | Assignment |
-| 2 | `??` | Nullish coalescing |
-| 3 | `==` `!=` | Equality |
-| 4 | `<` `>` `<=` `>=` | Comparison |
-| 5 | `+` `-` | Additive |
-| 6 | `*` `/` | Multiplicative |
-| 7 | `!` `-` `#` | Unary (prefix) |
-| 8 | `?` `!` | Postfix |
-| 9 | `()` `.` `?.` `[]` | Call / member access |
-| 10 | | Primary (literals, identifiers, parens) |
+| 1 | `=` `+=` `-=` `*=` `/=` `%=` | Assignment |
+| 2 | `\|\|` | Logical OR |
+| 3 | `&&` | Logical AND |
+| 4 | `??` | Nullish coalescing |
+| 5 | `==` `!=` | Equality |
+| 6 | `<` `>` `<=` `>=` | Comparison |
+| 7 | `\|` | Bitwise OR |
+| 8 | `^` | Bitwise XOR |
+| 9 | `&` | Bitwise AND |
+| 10 | `<<` `>>` | Shift |
+| 11 | `+` `-` | Additive |
+| 12 | `*` `/` `%` | Multiplicative |
+| 13 | `!` `-` `#` `~` | Unary (prefix) |
+| 14 | `?` `!` | Postfix |
+| 15 | `()` `.` `?.` `[]` | Call / member access |
+| 16 | | Primary (literals, identifiers, parens, match) |
 
 ## Error Messages
 
@@ -531,6 +672,119 @@ Unknown AST node types or other unexpected conditions are treated as compiler bu
 Internal compiler error — unknown node 'FooStatement'
 Please report this at github.com/user/dinglang
 ```
+
+## Power Operator
+
+The `**` operator performs exponentiation. It is right-associative.
+
+```
+const x = 2 ** 10      // 1024
+const y = 2 ** 3 ** 2  // 2 ** 9 = 512 (right-associative)
+```
+
+C target: lowers to `pow()` from `<math.h>`. JS target: native `**`.
+
+## String Repeat
+
+Multiplying a string by an integer repeats it (Pythonic syntax):
+
+```
+const divider = "-" * 40    // "----------------------------------------"
+const laugh = "ha" * 3      // "hahaha"
+```
+
+Works with both `"str" * n` and `n * "str"` orderings.
+
+## Pipe Operator
+
+The `|>` operator enables left-to-right function chaining. It desugars to function calls:
+
+```
+// Simple pipe: a |> f → f(a)
+const result = 5 |> double
+
+// Pipe with arguments: a |> f(b) → f(a, b)
+const result = 5 |> add(10)
+
+// Chaining: a |> f |> g → g(f(a))
+const result = data |> parse |> validate |> save
+```
+
+The pipe operator has very low precedence (just above assignment) and is left-associative.
+
+## Spread Operator
+
+The `...` operator spreads array elements into a new array literal:
+
+```
+const a = [1, 2, 3]
+const b = [4, 5, 6]
+const combined = [...a, ...b]        // [1, 2, 3, 4, 5, 6]
+const prefixed = [0, ...a]           // [0, 1, 2, 3]
+```
+
+C target: generates a push loop for each spread element. JS target: native spread.
+
+## Destructuring
+
+Destructuring extracts values from arrays and structs into individual bindings:
+
+### Array Destructuring
+
+```
+const [a, b, c] = someArray
+const [first, , third] = arr    // skip elements with empty slots
+```
+
+### Struct Destructuring
+
+```
+const { name, age } = person
+```
+
+Works with both `const` and `let`.
+
+## Array Methods
+
+Higher-order array methods for functional-style data processing:
+
+### map
+
+```
+const doubled = nums.map((x) => x * 2)
+```
+
+### filter
+
+```
+const evens = nums.filter((x) => x % 2 == 0)
+```
+
+### forEach
+
+```
+nums.forEach((item) => log(item))
+```
+
+### reduce
+
+```
+const sum = nums.reduce((acc, x) => acc + x, 0)
+```
+
+### find
+
+```
+const first = nums.find((x) => x > 10)  // returns first match or null
+```
+
+### includes
+
+```
+const has = nums.includes(42)  // returns bool
+```
+
+**C target:** Array methods with callbacks are inlined as loops (no function pointers). Only expression-body callbacks are supported: `(x) => x * 2`. Statement-body callbacks like `(x) => { return x * 2 }` are not supported in the C backend.
 
 ## Design Principles
 

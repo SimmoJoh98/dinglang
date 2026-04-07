@@ -1,0 +1,6 @@
+import { log } from 'ding:std'
+import { Player } from './player.dg'
+
+const p = Player { name: "Dallas", health: 100 }
+p.greet()
+log(`${p.name} has ${p.health} HP`)

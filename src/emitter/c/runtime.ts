@@ -41,11 +41,14 @@ typedef enum {
   DING_BOOL,
   DING_STRING,
   DING_ARRAY,
-  DING_OBJECT,
+  DING_MAP,
+  DING_CLOSURE,
 } DingType;
 
 typedef struct DingValue DingValue;
 typedef struct DingArray DingArray;
+typedef struct DingMap DingMap;
+typedef struct DingClosure DingClosure;
 
 struct DingArray {
   DingValue* items;
@@ -61,7 +64,38 @@ struct DingValue {
     ding_bool   as_bool;
     ding_string as_string;
     DingArray*  as_array;
+    DingMap*     as_map;
+    DingClosure* as_closure;
   };
+};
+
+// ── Closures ───────────────────────────────────────────────────────
+
+struct DingClosure {
+  DingValue (*fn)(void* env, DingValue* args, ding_int argc);
+  void* env;
+};
+
+static DingValue ding_closure_call(DingValue closure, DingValue* args, ding_int argc) {
+  if (closure.type != DING_CLOSURE) {
+    fprintf(stderr, "Ding: attempt to call a non-function value\\n");
+    exit(1);
+  }
+  return closure.as_closure->fn(closure.as_closure->env, args, argc);
+}
+
+// ── Map (hash table, string keys) ──────────────────────────────────
+
+typedef struct {
+  ding_string key;
+  DingValue   value;
+  ding_bool   occupied;
+} DingMapEntry;
+
+struct DingMap {
+  DingMapEntry* buckets;
+  ding_int      capacity;
+  ding_int      length;
 };
 
 static const DingValue DING_VALUE_NULL = { .type = DING_NULL };

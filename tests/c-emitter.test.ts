@@ -655,3 +655,233 @@ describe("C Emitter: integration", () => {
     expect(result).toContain("Vec2_add");
   });
 });
+
+// ── Batch 3 features ─────────────────────────────────────────────────
+
+describe("C Emitter: power operator", () => {
+  it("should emit pow() for **", () => {
+    const result = compileC("const x = 2 ** 3");
+    expect(result).toContain("pow(");
+  });
+
+  it("should emit right-associative power", () => {
+    const result = compileC("const x = 2 ** 3 ** 2");
+    expect(result).toContain("pow(");
+  });
+});
+
+describe("C Emitter: string repeat", () => {
+  it("should emit ding_string_repeat for string * n", () => {
+    const result = compileC('const x = "ha" * 3');
+    expect(result).toContain("ding_string_repeat(");
+  });
+
+  it("should include the ding_string_repeat function", () => {
+    const result = compileC('const x = "ha" * 3');
+    expect(result).toContain("ding_string ding_string_repeat(");
+  });
+});
+
+describe("C Emitter: pipe operator", () => {
+  it("should desugar pipe into function call", () => {
+    const result = compileC(`
+      const double = (x) => x * 2
+      const r = 5 |> double
+    `);
+    expect(result).toContain("ding_fn_double(");
+  });
+});
+
+describe("C Emitter: spread operator", () => {
+  it("should emit loop-based spread in array declaration", () => {
+    const result = compileC(`
+      const a: number[] = [1, 2]
+      const b = [...a, 3]
+    `);
+    expect(result).toContain("ding_array_new()");
+    expect(result).toContain("__spread_");
+    expect(result).toContain("->length");
+    expect(result).toContain("->items[");
+  });
+});
+
+describe("C Emitter: destructuring", () => {
+  it("should emit array destructuring", () => {
+    const result = compileC(`
+      const arr: number[] = [1, 2, 3]
+      const [a, b, c] = arr
+    `);
+    expect(result).toContain("ding_array_get(");
+    expect(result).toContain("DingValue a =");
+    expect(result).toContain("DingValue b =");
+    expect(result).toContain("DingValue c =");
+  });
+
+  it("should emit struct destructuring", () => {
+    const result = compileC(`
+      struct Point {
+        x: number
+        y: number
+      }
+      const p = Point { x: 10, y: 20 }
+      const { x, y } = p
+    `);
+    expect(result).toContain("ding_int x =");
+    expect(result).toContain("ding_int y =");
+    expect(result).toContain("->x");
+    expect(result).toContain("->y");
+  });
+});
+
+describe("C Emitter: array methods", () => {
+  it("should inline map as a loop", () => {
+    const result = compileC(`
+      const arr: number[] = [1, 2, 3]
+      const doubled = arr.map((x) => x * 2)
+    `);
+    expect(result).toContain("ding_array_new()");
+    expect(result).toContain("ding_array_push(");
+    expect(result).toContain("->length");
+  });
+
+  it("should inline filter as a conditional loop", () => {
+    const result = compileC(`
+      const arr: number[] = [1, 2, 3]
+      const pos = arr.filter((x) => x > 0)
+    `);
+    expect(result).toContain("ding_array_new()");
+    expect(result).toContain("if (");
+  });
+
+  it("should inline includes with ding_value_equals", () => {
+    const result = compileC(`
+      const arr: number[] = [1, 2, 3]
+      const has = arr.includes(2)
+    `);
+    expect(result).toContain("ding_value_equals(");
+  });
+
+  it("should inline reduce with accumulator", () => {
+    const result = compileC(`
+      const arr: number[] = [1, 2, 3]
+      const sum = arr.reduce((acc, x) => acc + x, 0)
+    `);
+    expect(result).toContain("__acc_");
+  });
+
+  it("should inline find with break", () => {
+    const result = compileC(`
+      const arr: number[] = [1, 2, 3]
+      const found = arr.find((x) => x > 1)
+    `);
+    expect(result).toContain("break;");
+    expect(result).toContain("DING_VALUE_NULL");
+  });
+
+  it("should include ding_value_equals function", () => {
+    const result = compileC("const x = 1");
+    expect(result).toContain("ding_bool ding_value_equals(");
+  });
+});
+
+// ── Batch 4 features ─────────────────────────────────────────────────
+
+describe("C Emitter: maps", () => {
+  it("should emit map declaration with ding_map_new", () => {
+    const result = compileC('const m = Map { "a": 1 }');
+    expect(result).toContain("ding_map_new()");
+    expect(result).toContain("ding_map_set(");
+  });
+
+  it("should emit map bracket access as ding_map_get", () => {
+    const result = compileC(`
+      const m = Map { "x": 42 }
+      const v = m["x"]
+    `);
+    expect(result).toContain("ding_map_get(");
+  });
+
+  it("should emit map has() method", () => {
+    const result = compileC(`
+      const m = Map { "x": 1 }
+      const h = m.has("x")
+    `);
+    expect(result).toContain("ding_map_has(");
+  });
+
+  it("should emit map keys() method", () => {
+    const result = compileC(`
+      const m = Map { "x": 1 }
+      const k = m.keys()
+    `);
+    expect(result).toContain("ding_map_keys(");
+  });
+
+  it("should include DingMap runtime", () => {
+    const result = compileC("const x = 1");
+    expect(result).toContain("DingMap* ding_map_new()");
+  });
+});
+
+describe("C Emitter: closures", () => {
+  it("should emit closure env struct and function", () => {
+    const result = compileC(`
+      const makeAdder = (n) => {
+        return (x) => x + n
+      }
+    `);
+    expect(result).toContain("__closure_env_");
+    expect(result).toContain("__closure_fn_");
+    expect(result).toContain("DingClosure");
+  });
+
+  it("should emit closure call via ding_closure_call", () => {
+    const result = compileC(`
+      const makeAdder = (n) => {
+        return (x) => x + n
+      }
+      const add5 = makeAdder(5)
+      const r = add5(10)
+    `);
+    expect(result).toContain("ding_closure_call(");
+  });
+
+  it("should handle zero-capture closures", () => {
+    const result = compileC(`
+      const f = (x) => {
+        const g = (y) => y * 2
+        return g
+      }
+    `);
+    expect(result).toContain("DingClosure");
+    expect(result).toContain("__closure_fn_");
+  });
+});
+
+describe("C Emitter: ding:io", () => {
+  it("should emit IO stdlib when imported", () => {
+    const result = compileC(`import { readFile } from 'ding:io'`);
+    expect(result).toContain("ding_io_readFile");
+    expect(result).toContain("int main(int argc, char** argv)");
+  });
+
+  it("should not emit IO stdlib when not imported", () => {
+    const result = compileC("const x = 1");
+    expect(result).not.toContain("ding_io_readFile");
+    expect(result).toContain("int main()");
+  });
+});
+
+describe("C Emitter: ding:json", () => {
+  it("should emit JSON stdlib when imported", () => {
+    const result = compileC(`import { parse, stringify } from 'ding:json'`);
+    expect(result).toContain("ding_json_parse");
+    expect(result).toContain("ding_json_stringify");
+    expect(result).toContain("__json_parse_value");
+  });
+
+  it("should not emit JSON stdlib when not imported", () => {
+    const result = compileC("const x = 1");
+    expect(result).not.toContain("ding_json_parse");
+  });
+});

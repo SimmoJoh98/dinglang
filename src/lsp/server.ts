@@ -13,11 +13,17 @@ import {
   Hover,
   MarkupKind,
   TextDocumentPositionParams,
+  DocumentSymbol,
+  SymbolKind,
+  Location,
+  Range,
+  Position,
 } from "vscode-languageserver/node.js";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import { Lexer } from "../lexer/index.js";
 import { Parser } from "../parser/index.js";
 import { DingError } from "../errors/index.js";
+import type { Program, Statement } from "../ast/nodes.js";
 
 /**
  * Pure function for validating a Ding document.
@@ -65,6 +71,7 @@ const KEYWORDS = [
   "const", "let", "for", "while", "if", "else", "return",
   "struct", "import", "from", "in", "null", "true", "false",
   "break", "continue", "throw", "try", "catch", "finally",
+  "enum", "match", "self", "as", "spawn",
 ];
 
 const STDLIB_SNIPPETS: Array<{ label: string; insert: string }> = [
@@ -88,6 +95,18 @@ const SNIPPET_COMPLETIONS: Array<{ label: string; insert: string }> = [
   { label: "try", insert: "try {\n\t$0\n} catch (${1:e}) {\n\t\n}" },
   { label: "import-std", insert: "import { ${1:log} } from 'ding:std'" },
   { label: "import-math", insert: "import { ${1:floor} } from 'ding:math'" },
+  { label: "enum", insert: "enum ${1:Name} {\n\t${2:Value},\n\t$0\n}" },
+  { label: "match", insert: "match (${1:value}) {\n\t${2:pattern} => ${3:result},\n\t_ => ${0:default}\n}" },
+  { label: "map", insert: ".map((${1:x}) => ${0:x})" },
+  { label: "filter", insert: ".filter((${1:x}) => ${0:condition})" },
+  { label: "reduce", insert: ".reduce((${1:acc}, ${2:x}) => ${3:acc + x}, ${0:initial})" },
+  { label: "map-literal", insert: "Map { '${1:key}': ${2:value} }" },
+  { label: "import-file", insert: "import { ${1:Name} } from './${2:file}.dg'" },
+  { label: "import-io", insert: "import { ${1:readFile}, ${2:writeFile} } from 'ding:io'" },
+  { label: "import-json", insert: "import { parse, stringify } from 'ding:json'" },
+  { label: "import-http", insert: "import { get, post } from 'ding:http'" },
+  { label: "import-concurrent", insert: "import { Channel } from 'ding:concurrent'" },
+  { label: "spawn", insert: "spawn () => {\n\t$0\n}" },
 ];
 
 export function getCompletionItems(): CompletionItem[] {
@@ -136,6 +155,28 @@ const HOVER_DOCS: Record<string, string> = {
   uint8: "8-bit unsigned integer, alias: byte",
   float64: "64-bit float, alias: double",
   cstring: "Raw C string (const char*), zero-copy",
+  enum: "Define an enumeration type: enum Name { A, B, C }",
+  match: "Pattern matching: match (val) { pattern => result, _ => default }",
+  self: "Reference to the current struct instance in methods",
+  map: "Transform each element: arr.map((x) => x * 2)",
+  filter: "Keep elements matching condition: arr.filter((x) => x > 0)",
+  reduce: "Accumulate into single value: arr.reduce((acc, x) => acc + x, 0)",
+  forEach: "Execute for each element: arr.forEach((x) => log(x))",
+  find: "Find first matching element: arr.find((x) => x > 5)",
+  includes: "Check if array contains value: arr.includes(42)",
+  Map: "Create a map (hash table): Map { 'key': value }. Access with map['key'], methods: .has(), .keys(), .values(), .delete()",
+  readFile: "Read entire file as string: readFile('path.txt')",
+  writeFile: "Write string to file: writeFile('path.txt', content)",
+  appendFile: "Append string to file: appendFile('path.txt', content)",
+  readLine: "Read a line from stdin: readLine()",
+  args: "Get command-line arguments as string[]: args()",
+  exists: "Check if file exists: exists('path.txt')",
+  parse: "Parse JSON string into ding value: parse('{\"key\": 1}')",
+  stringify: "Convert ding value to JSON string: stringify(data)",
+  get: "HTTP GET request: get('https://api.example.com')",
+  post: "HTTP POST request: post('https://api.example.com', body)",
+  Channel: "Create a channel for concurrent communication: Channel(). Methods: .send(val), .receive()",
+  spawn: "Spawn a concurrent task: spawn () => { ... }",
 };
 
 export function getHoverForWord(word: string): Hover | null {
@@ -163,6 +204,148 @@ function getWordAt(text: string, line: number, character: number): string | null
   return lineText.slice(start, end);
 }
 
+// ─── Document symbols ────────────────────────────────────────────────────
+
+interface DeclInfo {
+  name: string;
+  kind: SymbolKind;
+  line: number;
+}
+
+function parseSafely(content: string): Program | null {
+  try {
+    const tokens = new Lexer(content).tokenize();
+    return new Parser(tokens, content).parse();
+  } catch {
+    return null;
+  }
+}
+
+export function getDocumentSymbols(content: string): DocumentSymbol[] {
+  const ast = parseSafely(content);
+  if (!ast) return [];
+  const symbols: DocumentSymbol[] = [];
+  const lines = content.split("\n");
+
+  for (const stmt of ast.body) {
+    const info = getDeclInfo(stmt);
+    if (!info) continue;
+    // Find the line where this name appears
+    const lineIdx = findNameLine(lines, info.name, info.line);
+    const range = Range.create(lineIdx, 0, lineIdx, lines[lineIdx]?.length ?? 0);
+    const selRange = range;
+    symbols.push(DocumentSymbol.create(info.name, undefined, info.kind, range, selRange));
+  }
+  return symbols;
+}
+
+function getDeclInfo(stmt: Statement): DeclInfo | null {
+  switch (stmt.type) {
+    case "VariableDeclaration":
+      return {
+        name: stmt.name,
+        kind: stmt.init.type === "ArrowFunction" ? SymbolKind.Function : SymbolKind.Variable,
+        line: 0,
+      };
+    case "StructDeclaration":
+      return { name: stmt.name, kind: SymbolKind.Class, line: 0 };
+    case "EnumDeclaration":
+      return { name: stmt.name, kind: SymbolKind.Enum, line: 0 };
+    case "TypeAliasDeclaration":
+      return { name: stmt.name, kind: SymbolKind.TypeParameter, line: 0 };
+    default:
+      return null;
+  }
+}
+
+function findNameLine(lines: string[], name: string, startHint: number): number {
+  // Search for the line containing this declaration name
+  for (let i = startHint; i < lines.length; i++) {
+    if (lines[i].includes(name)) return i;
+  }
+  // Fallback: search from beginning
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].includes(name)) return i;
+  }
+  return 0;
+}
+
+// ─── Go-to-definition ────────────────────────────────────────────────────
+
+export function getDefinitionLocation(content: string, word: string): Location | null {
+  const ast = parseSafely(content);
+  if (!ast) return null;
+  const lines = content.split("\n");
+
+  for (const stmt of ast.body) {
+    const info = getDeclInfo(stmt);
+    if (!info || info.name !== word) continue;
+    const lineIdx = findNameLine(lines, word, 0);
+    const col = lines[lineIdx]?.indexOf(word) ?? 0;
+    return Location.create("", Range.create(lineIdx, col, lineIdx, col + word.length));
+  }
+  return null;
+}
+
+// ─── Context-aware completions ───────────────────────────────────────────
+
+const METHOD_COMPLETIONS: CompletionItem[] = [
+  // Array methods
+  { label: "push", kind: CompletionItemKind.Method },
+  { label: "map", kind: CompletionItemKind.Method, insertText: "map((${1:x}) => ${0:x})", insertTextFormat: InsertTextFormat.Snippet },
+  { label: "filter", kind: CompletionItemKind.Method, insertText: "filter((${1:x}) => ${0:condition})", insertTextFormat: InsertTextFormat.Snippet },
+  { label: "reduce", kind: CompletionItemKind.Method, insertText: "reduce((${1:acc}, ${2:x}) => ${3:acc + x}, ${0:initial})", insertTextFormat: InsertTextFormat.Snippet },
+  { label: "forEach", kind: CompletionItemKind.Method, insertText: "forEach((${1:x}) => ${0:body})", insertTextFormat: InsertTextFormat.Snippet },
+  { label: "find", kind: CompletionItemKind.Method },
+  { label: "includes", kind: CompletionItemKind.Method },
+  // String methods
+  { label: "indexOf", kind: CompletionItemKind.Method },
+  { label: "slice", kind: CompletionItemKind.Method },
+  { label: "trim", kind: CompletionItemKind.Method },
+  { label: "toUpperCase", kind: CompletionItemKind.Method },
+  { label: "toLowerCase", kind: CompletionItemKind.Method },
+  { label: "startsWith", kind: CompletionItemKind.Method },
+  { label: "endsWith", kind: CompletionItemKind.Method },
+  { label: "split", kind: CompletionItemKind.Method },
+  { label: "replace", kind: CompletionItemKind.Method },
+  // Map methods
+  { label: "has", kind: CompletionItemKind.Method },
+  { label: "keys", kind: CompletionItemKind.Method },
+  { label: "values", kind: CompletionItemKind.Method },
+  { label: "delete", kind: CompletionItemKind.Method },
+  // Channel methods
+  { label: "send", kind: CompletionItemKind.Method },
+  { label: "receive", kind: CompletionItemKind.Method },
+];
+
+const MODULE_COMPLETIONS: CompletionItem[] = [
+  { label: "ding:std", kind: CompletionItemKind.Module },
+  { label: "ding:math", kind: CompletionItemKind.Module },
+  { label: "ding:io", kind: CompletionItemKind.Module },
+  { label: "ding:json", kind: CompletionItemKind.Module },
+  { label: "ding:http", kind: CompletionItemKind.Module },
+  { label: "ding:concurrent", kind: CompletionItemKind.Module },
+];
+
+export function getContextualCompletions(content: string, line: number, character: number): CompletionItem[] {
+  const lines = content.split("\n");
+  const lineText = lines[line] ?? "";
+  const prefix = lineText.slice(0, character);
+
+  // After '.': return method completions
+  if (prefix.endsWith(".")) {
+    return METHOD_COMPLETIONS;
+  }
+
+  // After 'from ': return module completions
+  if (/from\s+['"]$/.test(prefix)) {
+    return MODULE_COMPLETIONS;
+  }
+
+  // Default: all completions
+  return getCompletionItems();
+}
+
 // ─── LSP bootstrap ────────────────────────────────────────────────────────
 
 export function startServer(): void {
@@ -180,10 +363,8 @@ export function startServer(): void {
           resolveProvider: false,
         },
         hoverProvider: true,
-        diagnosticProvider: {
-          interFileDependencies: false,
-          workspaceDiagnostics: false,
-        },
+        documentSymbolProvider: true,
+        definitionProvider: true,
       },
     };
   });
@@ -202,14 +383,47 @@ export function startServer(): void {
   documents.onDidOpen((e) => runValidation(e.document));
   documents.onDidChangeContent((e) => runValidation(e.document));
 
-  connection.onCompletion((_params: TextDocumentPositionParams): CompletionItem[] => {
+  connection.onCompletion((params: TextDocumentPositionParams): CompletionItem[] => {
     try {
-      return getCompletionItems();
+      const doc = documents.get(params.textDocument.uri);
+      if (!doc) return getCompletionItems();
+      return getContextualCompletions(doc.getText(), params.position.line, params.position.character);
     } catch (err) {
       connection.console.error(
         `completion crashed: ${err instanceof Error ? err.message : String(err)}`,
       );
       return [];
+    }
+  });
+
+  connection.onDocumentSymbol((params) => {
+    try {
+      const doc = documents.get(params.textDocument.uri);
+      if (!doc) return [];
+      return getDocumentSymbols(doc.getText());
+    } catch (err) {
+      connection.console.error(
+        `document symbols crashed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [];
+    }
+  });
+
+  connection.onDefinition((params) => {
+    try {
+      const doc = documents.get(params.textDocument.uri);
+      if (!doc) return null;
+      const word = getWordAt(doc.getText(), params.position.line, params.position.character);
+      if (!word) return null;
+      const loc = getDefinitionLocation(doc.getText(), word);
+      if (!loc) return null;
+      // Return with the actual document URI
+      return Location.create(params.textDocument.uri, loc.range);
+    } catch (err) {
+      connection.console.error(
+        `go-to-definition crashed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
     }
   });
 

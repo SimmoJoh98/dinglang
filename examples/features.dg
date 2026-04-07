@@ -1,6 +1,8 @@
 import { log } from 'ding:std'
 import { floor, random } from 'ding:math'
 
+// ── Structs ─────────────────────────────────────────────────────────
+
 struct Player {
   name: string
   health: number
@@ -31,11 +33,80 @@ for item in player.inventory {
   log(`- ${item}`)
 }
 
+// ── Logical operators ───────────────────────────────────────────────
+
+let x = 10
+if (x > 5 && x < 20) {
+  log("x is between 5 and 20")
+}
+
+if (x < 0 || x > 5) {
+  log("x is negative or greater than 5")
+}
+
+// ── Modulo and bitwise ──────────────────────────────────────────────
+
+const remainder = 17 % 5
+log(`17 mod 5 = ${remainder}`)
+
+const masked = 255 & 15
+log(`255 & 15 = ${masked}`)
+
+const shifted = 1 << 4
+log(`1 << 4 = ${shifted}`)
+
+// ── Compound assignment ─────────────────────────────────────────────
+
+let score = 0
+score += 10
+score *= 2
+score -= 5
+log(`Score: ${score}`)
+
+// ── Default parameters ──────────────────────────────────────────────
+
+const greetFn = (name, greeting = "Hello") => {
+  log(`${greeting}, ${name}!`)
+}
+greetFn("Alice")
+greetFn("Bob", "Hey")
+
+// ── Enums ───────────────────────────────────────────────────────────
+
+enum Color {
+  Red,
+  Green,
+  Blue
+}
+
+enum HttpStatus {
+  Ok = 200,
+  NotFound = 404,
+  ServerError = 500
+}
+
+const c = Color.Red
+log(`Color.Red = ${c}`)
+log(`HttpStatus.NotFound = ${HttpStatus.NotFound}`)
+
+// ── Match expressions ───────────────────────────────────────────────
+
+let status = 200
+match (status) {
+  200 => log("OK"),
+  404 => log("Not Found"),
+  _ => log("Unknown status")
+}
+
+// ── For range with hit tracking ─────────────────────────────────────
+
 let i = 0
 for i = 0..3 {
   player.health = player.health - 10
   log(`Hit! Health: ${player.health}`)
 }
+
+// ── Error handling ──────────────────────────────────────────────────
 
 const safeGet = (arr, idx) => {
   try {
@@ -51,3 +122,94 @@ const safeGet = (arr, idx) => {
 
 const item = safeGet(player.inventory, 0) ?? "nothing"
 log(`First item: ${item}`)
+
+// ── Power operator ──────────────────────────────────────────────────
+
+const squared = 2 ** 10
+log(`2 ** 10 = ${squared}`)
+
+const cubed = 2 ** 3 ** 2
+log(`2 ** 3 ** 2 = ${cubed}`)
+
+// ── String repeat ───────────────────────────────────────────────────
+
+const divider = "-" * 20
+log(divider)
+
+const laugh = "ha" * 3
+log(`Laugh: ${laugh}`)
+
+// ── Pipe operator ───────────────────────────────────────────────────
+
+const double = (n) => n * 2
+const addTen = (n, extra) => n + extra
+
+const piped = 5 |> double |> addTen(100)
+log(`5 |> double |> addTen(100) = ${piped}`)
+
+// ── Spread operator ─────────────────────────────────────────────────
+
+const first: number[] = [1, 2, 3]
+const second: number[] = [4, 5, 6]
+const combined = [...first, ...second]
+log(`Combined length: ${#combined}`)
+
+// ── Destructuring ───────────────────────────────────────────────────
+
+const { name, health } = player
+log(`Destructured: ${name} with ${health} HP`)
+
+const coords: number[] = [10, 20, 30]
+const [cx, cy, cz] = coords
+log(`Coords: ${cx}, ${cy}, ${cz}`)
+
+// ── Array methods ───────────────────────────────────────────────────
+
+const nums: number[] = [1, 2, 3, 4, 5]
+
+const doubled = nums.map((n) => n * 2)
+log(`Mapped: ${#doubled} items`)
+
+const evens = nums.filter((n) => n % 2 == 0)
+log(`Evens: ${#evens} items`)
+
+const sum = nums.reduce((acc, n) => acc + n, 0)
+log(`Sum: ${sum}`)
+
+const found = nums.find((n) => n > 3)
+log(`Found > 3: ${found}`)
+
+const has3 = nums.includes(3)
+log(`Includes 3: ${has3}`)
+
+nums.forEach((n) => log(`- ${n}`))
+
+// ── Maps ────────────────────────────────────────────────────────────
+
+const config = Map { 'host': 'localhost', 'port': '8080' }
+log(`Host: ${config['host']}`)
+config['debug'] = 'true'
+log(`Has debug: ${config.has('debug')}`)
+log(`Map size: ${#config}`)
+
+const keys = config.keys()
+for k in keys {
+  log(`  ${k}: ${config[k]}`)
+}
+
+// ── Closures ────────────────────────────────────────────────────────
+
+const multiplier = (factor) => {
+  return (n) => n * factor
+}
+
+const quadruple = multiplier(4)
+log(`4 * 7 = ${quadruple(7)}`)
+
+const prefix = ">>>"
+const makeLogger = (tag) => {
+  return (msg) => log(`${prefix} [${tag}] ${msg}`)
+}
+
+const info = makeLogger("INFO")
+info("Server started")

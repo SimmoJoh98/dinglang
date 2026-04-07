@@ -1,0 +1,8 @@
+struct Player {
+  name: string
+  health: number
+
+  const greet = (self) => {
+    log(`I am ${self.name}, health: ${self.health}`)
+  }
+}

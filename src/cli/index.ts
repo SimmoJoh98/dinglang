@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFile, writeFile, unlink } from "node:fs/promises";
+import { writeFile, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { resolve, basename } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -9,8 +9,9 @@ import { Parser } from "../parser/index.js";
 import { Emitter, CEmitter } from "../emitter/index.js";
 import { DingError, formatError } from "../errors/index.js";
 import { extractDirectives } from "../directives/index.js";
+import { ModuleGraph } from "../module/index.js";
 
-const VERSION = "0.3.0";
+const VERSION = "0.5.0";
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -50,6 +51,7 @@ Usage:
   ding build <file>             compile to native binary via gcc
   ding build <file> --target js compile to JS file
   ding build <file> --target c  compile to C source file
+  ding repl                     start interactive REPL session
   ding lsp                      start the Ding LSP server on stdio
   ding version                  print version
   ding help                     show this message
@@ -65,21 +67,35 @@ function error(msg: string): never {
   process.exit(1);
 }
 
-function compileJS(source: string): string {
-  // Directives are a C-backend feature today; for the JS target we still
-  // strip them so the user can keep a single `.dg` file portable across
-  // targets without the lexer seeing `#[...]`.
+function compileJSFromSource(source: string): string {
   const { source: stripped } = extractDirectives(source);
   const tokens = new Lexer(stripped).tokenize();
   const ast = new Parser(tokens, stripped).parse();
   return new Emitter(ast).emit();
 }
 
-function compileC(source: string): string {
+function compileCFromSource(source: string): string {
   const { directives, source: stripped } = extractDirectives(source);
   const tokens = new Lexer(stripped).tokenize();
   const ast = new Parser(tokens, stripped).parse();
   return new CEmitter({ arenaSize: directives.arenaSize }).emit(ast);
+}
+
+function compileJS(filePath: string): string {
+  const graph = new ModuleGraph();
+  graph.build(filePath);
+  const merged = graph.getMergedProgram();
+  return new Emitter(merged).emit();
+}
+
+function compileC(filePath: string): { source: string; libs: string[] } {
+  const graph = new ModuleGraph();
+  graph.build(filePath);
+  const merged = graph.getMergedProgram();
+  const directives = graph.getEntryDirectives();
+  const emitter = new CEmitter({ arenaSize: directives.arenaSize });
+  const source = emitter.emit(merged);
+  return { source, libs: emitter.getRequiredLibs() };
 }
 
 function checkGcc(): void {
@@ -94,12 +110,12 @@ function checkGcc(): void {
 
 async function run(filePath: string, target: Target): Promise<void> {
   const resolved = resolve(filePath);
-  const source = await readSource(filePath, resolved);
+  if (!existsSync(resolved)) error(`File not found: ${filePath}`);
 
   if (target === "js") {
     let js: string;
     try {
-      js = compileJS(source);
+      js = compileJS(resolved);
     } catch (err) {
       handleError(err);
     }
@@ -110,9 +126,9 @@ async function run(filePath: string, target: Target): Promise<void> {
   }
 
   // C target (default)
-  let c: string;
+  let compiled: { source: string; libs: string[] };
   try {
-    c = compileC(source);
+    compiled = compileC(resolved);
   } catch (err) {
     handleError(err);
   }
@@ -121,10 +137,10 @@ async function run(filePath: string, target: Target): Promise<void> {
 
   const tmpC = "/tmp/ding_out.c";
   const tmpBin = "/tmp/ding_out";
-  await writeFile(tmpC, c, "utf-8");
+  await writeFile(tmpC, compiled.source, "utf-8");
 
   try {
-    execFileSync("gcc", ["-O2", "-o", tmpBin, tmpC, "-lm"], {
+    execFileSync("gcc", ["-O2", "-o", tmpBin, tmpC, ...compiled.libs], {
       stdio: "inherit",
     });
     execFileSync(tmpBin, [], { stdio: "inherit" });
@@ -137,12 +153,12 @@ async function run(filePath: string, target: Target): Promise<void> {
 
 async function build(filePath: string, target: Target): Promise<void> {
   const resolved = resolve(filePath);
-  const source = await readSource(filePath, resolved);
+  if (!existsSync(resolved)) error(`File not found: ${filePath}`);
 
   if (target === "js") {
     let js: string;
     try {
-      js = compileJS(source);
+      js = compileJS(resolved);
     } catch (err) {
       handleError(err);
     }
@@ -153,9 +169,9 @@ async function build(filePath: string, target: Target): Promise<void> {
   }
 
   // C target
-  let c: string;
+  let compiled: { source: string; libs: string[] };
   try {
-    c = compileC(source);
+    compiled = compileC(resolved);
   } catch (err) {
     handleError(err);
   }
@@ -164,7 +180,7 @@ async function build(filePath: string, target: Target): Promise<void> {
   const targetIdx = args.indexOf("--target");
   if (targetIdx !== -1 && args[targetIdx + 1] === "c") {
     const outPath = resolved.replace(/\.dg$/, ".c");
-    await writeFile(outPath, c + "\n", "utf-8");
+    await writeFile(outPath, compiled.source + "\n", "utf-8");
     console.log(`[ding] compiled ${basename(filePath)} → ${basename(outPath)}`);
     return;
   }
@@ -173,10 +189,10 @@ async function build(filePath: string, target: Target): Promise<void> {
   checkGcc();
   const tmpC = resolved.replace(/\.dg$/, ".c");
   const outBin = resolved.replace(/\.dg$/, "");
-  await writeFile(tmpC, c, "utf-8");
+  await writeFile(tmpC, compiled.source, "utf-8");
 
   try {
-    execFileSync("gcc", ["-O2", "-o", outBin, tmpC, "-lm"], {
+    execFileSync("gcc", ["-O2", "-o", outBin, tmpC, ...compiled.libs], {
       stdio: "inherit",
     });
     console.log(`[ding] compiled ${basename(filePath)} → ${basename(outBin)}`);
@@ -200,17 +216,6 @@ function handleError(err: unknown): never {
   process.exit(1);
 }
 
-async function readSource(filePath: string, resolved: string): Promise<string> {
-  if (!existsSync(resolved)) {
-    error(`File not found: ${filePath}`);
-  }
-  try {
-    return await readFile(resolved, "utf-8");
-  } catch {
-    error(`File not found: ${filePath}`);
-  }
-}
-
 function requireFile(file: string | undefined, cmd: string): string {
   if (!file) {
     error(`Missing file argument\nUsage: ding ${cmd} <file.dg>`);
@@ -230,6 +235,11 @@ switch (command) {
   case "build": {
     const file = requireFile(cleanArgs[1], "build");
     await build(file, target);
+    break;
+  }
+  case "repl": {
+    const { startRepl } = await import("./repl.js");
+    startRepl();
     break;
   }
   case "lsp": {

@@ -3,7 +3,11 @@
 export const DEFAULT_ARENA_SIZE = 256 * 1024 * 1024;
 
 /** Emit the arena runtime with a specific capacity baked in. */
-export function cArena(sizeBytes: number = DEFAULT_ARENA_SIZE): string {
+export function cArena(sizeBytes: number = DEFAULT_ARENA_SIZE, threadSafe: boolean = false): string {
+  const mutexDecl = threadSafe ? `\nstatic pthread_mutex_t __ding_arena_mutex = PTHREAD_MUTEX_INITIALIZER;` : "";
+  const lockCall = threadSafe ? `  pthread_mutex_lock(&__ding_arena_mutex);\n` : "";
+  const unlockCall = threadSafe ? `  pthread_mutex_unlock(&__ding_arena_mutex);\n` : "";
+
   return `\
 // ── Arena allocator ─────────────────────────────────────────────────
 
@@ -15,7 +19,7 @@ typedef struct {
   size_t   capacity;
 } DingArena;
 
-static DingArena __ding_arena;
+static DingArena __ding_arena;${mutexDecl}
 
 void ding_arena_init() {
   __ding_arena.base     = (uint8_t*)malloc(DING_ARENA_SIZE);
@@ -28,14 +32,14 @@ void ding_arena_init() {
 }
 
 void* ding_alloc(size_t size) {
-  size = (size + 7) & ~7;
+${lockCall}  size = (size + 7) & ~7;
   if (__ding_arena.offset + size > __ding_arena.capacity) {
     fprintf(stderr, "Ding: arena out of memory\\n");
     exit(1);
   }
   void* ptr = __ding_arena.base + __ding_arena.offset;
   __ding_arena.offset += size;
-  return ptr;
+${unlockCall}  return ptr;
 }
 
 void ding_arena_free() {

@@ -493,4 +493,114 @@ const c = a + b`;
       expect(() => emitter.emit()).toThrow("Internal compiler error");
     });
   });
+
+  // ── Batch 3 features ─────────────────────────────────────────────────
+
+  describe("power operator", () => {
+    it("should emit ** as native JS", () => {
+      expect(compile("const x = 2 ** 3")).toBe("const x = 2 ** 3;");
+    });
+
+    it("should handle right-associative **", () => {
+      expect(compile("const x = 2 ** 3 ** 2")).toBe("const x = 2 ** 3 ** 2;");
+    });
+  });
+
+  describe("string repeat", () => {
+    it("should emit string * n as .repeat()", () => {
+      const out = compile('const x = "ha" * 3');
+      expect(out).toBe('const x = "ha".repeat(3);');
+    });
+
+    it("should emit n * string as .repeat()", () => {
+      const out = compile('const x = 3 * "ha"');
+      expect(out).toBe('const x = "ha".repeat(3);');
+    });
+  });
+
+  describe("pipe operator", () => {
+    it("should desugar pipe into function call", () => {
+      expect(compile("5 |> double")).toBe("double(5);");
+    });
+
+    it("should desugar pipe with args", () => {
+      expect(compile("5 |> add(10)")).toBe("add(5, 10);");
+    });
+
+    it("should chain pipes", () => {
+      expect(compile("5 |> double |> toString")).toBe("toString(double(5));");
+    });
+  });
+
+  describe("spread operator", () => {
+    it("should emit spread in array literal", () => {
+      expect(compile("const x = [...arr, 1]")).toBe("const x = [...arr, 1];");
+    });
+
+    it("should emit multiple spreads", () => {
+      expect(compile("const x = [...a, ...b]")).toBe("const x = [...a, ...b];");
+    });
+  });
+
+  describe("destructuring", () => {
+    it("should emit array destructuring", () => {
+      expect(compile("const [a, b] = arr")).toBe("const [a, b] = arr;");
+    });
+
+    it("should emit object destructuring", () => {
+      expect(compile("const { name, age } = person")).toBe("const { name, age } = person;");
+    });
+
+    it("should emit let destructuring", () => {
+      expect(compile("let [x, y] = coords")).toBe("let [x, y] = coords;");
+    });
+  });
+
+  describe("array methods", () => {
+    it("should emit map natively", () => {
+      expect(compile("arr.map((x) => x * 2)")).toBe("arr.map((x) => x * 2);");
+    });
+
+    it("should emit filter natively", () => {
+      expect(compile("arr.filter((x) => x > 0)")).toBe("arr.filter((x) => x > 0);");
+    });
+
+    it("should emit forEach natively", () => {
+      expect(compile("arr.forEach((x) => log(x))")).toContain("arr.forEach((x) => log(x))");
+    });
+
+    it("should emit reduce natively", () => {
+      expect(compile("arr.reduce((a, b) => a + b, 0)")).toContain("arr.reduce((a, b) => a + b, 0)");
+    });
+
+    it("should emit includes natively", () => {
+      expect(compile("arr.includes(5)")).toBe("arr.includes(5);");
+    });
+  });
+
+  // ── Batch 4 features ─────────────────────────────────────────────────
+
+  describe("map literals", () => {
+    it("should emit map as new Map()", () => {
+      const out = compile('const m = Map { "a": 1, "b": 2 }');
+      expect(out).toContain("new Map(");
+      expect(out).toContain('"a"');
+    });
+
+    it("should emit empty map", () => {
+      expect(compile("const m = Map {}")).toContain("new Map([])");
+    });
+
+    it("should emit map bracket access as .get()", () => {
+      const out = compile('const m = Map { "x": 1 }\nm["x"]');
+      expect(out).toContain('.get("x")');
+    });
+  });
+
+  describe("closures", () => {
+    it("should emit arrow functions as JS closures natively", () => {
+      const out = compile("const f = (x) => (y) => x + y");
+      expect(out).toContain("(x) => (y) => x + y");
+    });
+  });
 });

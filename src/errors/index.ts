@@ -1,4 +1,4 @@
-export type Phase = "lexer" | "parser" | "emitter" | "runtime";
+export type Phase = "lexer" | "parser" | "emitter" | "runtime" | "module";
 
 export class DingError extends Error {
   phase: Phase;

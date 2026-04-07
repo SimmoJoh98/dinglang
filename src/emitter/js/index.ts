@@ -9,6 +9,7 @@ import type {
   ReturnStatement,
   IfStatement,
   BinaryExpression,
+  UnaryExpression,
   ArrowFunction,
   CallExpression,
   TemplateLiteral,
@@ -27,6 +28,12 @@ import type {
   NullishCoalescing,
   NullAssertion,
   AssignmentExpression,
+  EnumDeclaration,
+  MatchStatement,
+  MatchExpression,
+  MatchArm,
+  DestructuringDeclaration,
+  MapLiteral,
 } from "../../ast/nodes.js";
 import { isDingModule, getPolyfill, getModule } from "../../std/index.js";
 
@@ -36,6 +43,8 @@ export class JSEmitter {
   private ast: Program;
   private indent: number = 0;
   private polyfills: string[] = [];
+  private tempCounter: number = 0;
+  private mapVars: Set<string> = new Set();
 
   constructor(ast: Program) {
     this.ast = ast;
@@ -88,6 +97,16 @@ export class JSEmitter {
         return this.emitTryCatchStatement(node);
       case "ThrowStatement":
         return this.emitThrowStatement(node);
+      case "EnumDeclaration":
+        return this.emitEnumDeclaration(node);
+      case "MatchStatement":
+        return this.emitMatchStatement(node);
+      case "DestructuringDeclaration":
+        return this.emitDestructuringDeclaration(node);
+      case "SpawnStatement":
+        return `${this.pad()}setTimeout(() => { ${this.emitExpression(node.body)}; }, 0);`;
+      case "TypeAliasDeclaration":
+        return null; // types erased in JS
       default:
         throw new DingError("emitter", `Internal compiler error — unknown statement type '${(node as any).type}'`, {
           hint: "Please report this at github.com/user/dinglang",
@@ -95,9 +114,81 @@ export class JSEmitter {
     }
   }
 
+  private emitEnumDeclaration(node: EnumDeclaration): string {
+    const entries: string[] = [];
+    let nextValue = 0;
+    for (const member of node.members) {
+      if (member.value && member.value.type === "NumberLiteral") {
+        nextValue = member.value.value;
+      }
+      entries.push(`${member.name}: ${nextValue}`);
+      nextValue++;
+    }
+    return `${this.pad()}const ${node.name} = Object.freeze({ ${entries.join(", ")} });`;
+  }
+
+  private emitMatchStatement(node: MatchStatement): string {
+    return this.emitMatchArms(node.subject, node.arms);
+  }
+
+  private emitMatchArms(subject: Expression, arms: MatchArm[]): string {
+    const subjectExpr = this.emitExpression(subject);
+    const tmp = `__match_${this.tempCounter++}`;
+    const lines: string[] = [];
+    lines.push(`${this.pad()}const ${tmp} = ${subjectExpr};`);
+
+    for (let i = 0; i < arms.length; i++) {
+      const arm = arms[i];
+      if (arm.pattern.kind === "wildcard") {
+        if (i > 0) lines.push(`${this.pad()}} else {`);
+        else lines.push(`${this.pad()}{`);
+      } else {
+        const cond = this.emitMatchCondition(tmp, arm.pattern);
+        const keyword = i === 0 ? "if" : "} else if";
+        lines.push(`${this.pad()}${keyword} (${cond}) {`);
+      }
+
+      this.indent++;
+      if (Array.isArray(arm.body)) {
+        for (const stmt of arm.body) {
+          const result = this.emitStatement(stmt);
+          if (result !== null) lines.push(result);
+        }
+      } else {
+        lines.push(`${this.pad()}${this.emitExpression(arm.body)};`);
+      }
+      this.indent--;
+    }
+    if (arms.length > 0) lines.push(`${this.pad()}}`);
+    return lines.join("\n");
+  }
+
+  private emitMatchCondition(subjectVar: string, pattern: MatchArm["pattern"]): string {
+    switch (pattern.kind) {
+      case "literal":
+        return `${subjectVar} === ${this.emitExpression(pattern.value)}`;
+      case "range":
+        return `${subjectVar} >= ${this.emitExpression(pattern.start)} && ${subjectVar} < ${this.emitExpression(pattern.end)}`;
+      case "wildcard":
+        return "true";
+    }
+  }
+
   private emitVariableDeclaration(node: VariableDeclaration): string {
+    if (node.init.type === "MapLiteral") this.mapVars.add(node.name);
     const init = this.emitExpression(node.init);
     return `${this.pad()}${node.kind} ${node.name} = ${init};`;
+  }
+
+  private emitDestructuringDeclaration(node: DestructuringDeclaration): string {
+    const init = this.emitExpression(node.init);
+    if (node.pattern.kind === "array") {
+      const elems = node.pattern.elements.map((e) => e ?? "").join(", ");
+      return `${this.pad()}${node.kind} [${elems}] = ${init};`;
+    } else {
+      const props = node.pattern.properties.join(", ");
+      return `${this.pad()}${node.kind} { ${props} } = ${init};`;
+    }
   }
 
   private emitExpressionStatement(node: ExpressionStatement): string {
@@ -175,6 +266,10 @@ export class JSEmitter {
     const id = node.identifier;
     const iterable = this.emitExpression(node.iterable);
     const body = this.emitBlock(node.body);
+    // Map iteration: iterate keys
+    if (node.iterable.type === "Identifier" && this.mapVars.has(node.iterable.name)) {
+      return `${this.pad()}for (const ${id} of ${iterable}.keys()) {\n${body}\n${this.pad()}}`;
+    }
     return `${this.pad()}for (const ${id} of ${iterable}) {\n${body}\n${this.pad()}}`;
   }
 
@@ -262,7 +357,7 @@ export class JSEmitter {
       case "NumberLiteral":
         return String(node.value);
       case "StringLiteral":
-        return `"${node.value}"`;
+        return `"${node.value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
       case "BooleanLiteral":
         return String(node.value);
       case "NullLiteral":
@@ -271,6 +366,8 @@ export class JSEmitter {
         return node.name;
       case "BinaryExpression":
         return this.emitBinaryExpression(node);
+      case "UnaryExpression":
+        return `(${node.operator}${this.emitExpression(node.operand)})`;
       case "ArrowFunction":
         return this.emitArrowFunction(node);
       case "CallExpression":
@@ -295,6 +392,10 @@ export class JSEmitter {
         return this.emitNullAssertion(node);
       case "AssignmentExpression":
         return this.emitAssignmentExpression(node);
+      case "MapLiteral":
+        return this.emitMapLiteral(node);
+      case "MatchExpression":
+        return this.emitMatchExpression(node);
       default:
         throw new DingError("emitter", `Internal compiler error — unknown expression type '${(node as any).type}'`, {
           hint: "Please report this at github.com/user/dinglang",
@@ -302,7 +403,59 @@ export class JSEmitter {
     }
   }
 
+  private emitMapLiteral(node: MapLiteral): string {
+    const entries = node.entries.map((e) =>
+      `[${this.emitExpression(e.key)}, ${this.emitExpression(e.value)}]`
+    ).join(", ");
+    return `new Map([${entries}])`;
+  }
+
+  private emitMatchExpression(node: MatchExpression): string {
+    // Emit as IIFE with if/else chain
+    const tmp = `__match_${this.tempCounter++}`;
+    const lines: string[] = [];
+    lines.push(`(() => {`);
+    this.indent++;
+    lines.push(`${this.pad()}const ${tmp} = ${this.emitExpression(node.subject)};`);
+
+    for (let i = 0; i < node.arms.length; i++) {
+      const arm = node.arms[i];
+      if (arm.pattern.kind === "wildcard") {
+        if (i > 0) lines.push(`${this.pad()}} else {`);
+        else lines.push(`${this.pad()}{`);
+      } else {
+        const cond = this.emitMatchCondition(tmp, arm.pattern);
+        const keyword = i === 0 ? "if" : "} else if";
+        lines.push(`${this.pad()}${keyword} (${cond}) {`);
+      }
+
+      this.indent++;
+      if (Array.isArray(arm.body)) {
+        for (const stmt of arm.body) {
+          const result = this.emitStatement(stmt);
+          if (result !== null) lines.push(result);
+        }
+      } else {
+        lines.push(`${this.pad()}return ${this.emitExpression(arm.body)};`);
+      }
+      this.indent--;
+    }
+    if (node.arms.length > 0) lines.push(`${this.pad()}}`);
+    this.indent--;
+    lines.push(`${this.pad()}})()`);
+    return lines.join("\n");
+  }
+
   private emitBinaryExpression(node: BinaryExpression): string {
+    // String repeat: "str" * n → "str".repeat(n)
+    if (node.operator === "*") {
+      if (node.left.type === "StringLiteral" || node.left.type === "TemplateLiteral") {
+        return `${this.emitExpression(node.left)}.repeat(${this.emitExpression(node.right)})`;
+      }
+      if (node.right.type === "StringLiteral" || node.right.type === "TemplateLiteral") {
+        return `${this.emitExpression(node.right)}.repeat(${this.emitExpression(node.left)})`;
+      }
+    }
     const left = this.emitExpression(node.left);
     const right = this.emitExpression(node.right);
     const op = node.operator === "!=" ? "!==" : node.operator === "==" ? "===" : node.operator;
@@ -310,7 +463,10 @@ export class JSEmitter {
   }
 
   private emitArrowFunction(node: ArrowFunction): string {
-    const params = node.params.map((p) => p.name).join(", ");
+    const params = node.params.map((p) => {
+      if (p.defaultValue) return `${p.name} = ${this.emitExpression(p.defaultValue)}`;
+      return p.name;
+    }).join(", ");
 
     if (Array.isArray(node.body)) {
       const block = this.emitBlock(node.body);
@@ -321,6 +477,13 @@ export class JSEmitter {
   }
 
   private emitCallExpression(node: CallExpression): string {
+    // Map.keys() and Map.values() need Array.from() wrapper in JS
+    if (node.callee.type === "MemberExpression" && node.callee.object.type === "Identifier" && this.mapVars.has(node.callee.object.name)) {
+      const method = node.callee.property;
+      if (method === "keys" || method === "values") {
+        return `Array.from(${node.callee.object.name}.${method}())`;
+      }
+    }
     const callee = this.emitExpression(node.callee);
     const args = node.arguments.map((a) => this.emitExpression(a)).join(", ");
     return `${callee}(${args})`;
@@ -336,15 +499,24 @@ export class JSEmitter {
   }
 
   private emitArrayLiteral(node: ArrayLiteral): string {
-    const elements = node.elements.map((e) => this.emitExpression(e)).join(", ");
+    const elements = node.elements.map((e) => {
+      if (e.type === "SpreadElement") return `...${this.emitExpression(e.argument)}`;
+      return this.emitExpression(e);
+    }).join(", ");
     return `[${elements}]`;
   }
 
   private emitArrayAccess(node: ArrayAccess): string {
+    if (node.array.type === "Identifier" && this.mapVars.has(node.array.name)) {
+      return `${node.array.name}.get(${this.emitExpression(node.index)})`;
+    }
     return `${this.emitExpression(node.array)}[${this.emitExpression(node.index)}]`;
   }
 
   private emitLengthExpression(node: LengthExpression): string {
+    if (node.target.type === "Identifier" && this.mapVars.has(node.target.name)) {
+      return `${node.target.name}.size`;
+    }
     return `${this.emitExpression(node.target)}.length`;
   }
 
@@ -373,6 +545,10 @@ export class JSEmitter {
   }
 
   private emitAssignmentExpression(node: AssignmentExpression): string {
+    // Map bracket assignment: map["key"] = value
+    if (node.target.type === "ArrayAccess" && node.target.array.type === "Identifier" && this.mapVars.has(node.target.array.name)) {
+      return `${node.target.array.name}.set(${this.emitExpression(node.target.index)}, ${this.emitExpression(node.value)})`;
+    }
     return `${this.emitExpression(node.target)} = ${this.emitExpression(node.value)}`;
   }
 

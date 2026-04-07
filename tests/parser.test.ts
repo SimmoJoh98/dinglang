@@ -768,4 +768,151 @@ const status = getStatus(health)
       expect((assign.target as ArrayAccess).type).toBe("ArrayAccess");
     });
   });
+
+  // ── Batch 3 ─────────────────────────────────────────────────────────
+
+  describe("power operator", () => {
+    it("should parse 2 ** 3 as BinaryExpression", () => {
+      const ast = parse("const x = 2 ** 3");
+      const decl = ast.body[0] as VariableDeclaration;
+      const bin = decl.init as BinaryExpression;
+      expect(bin.type).toBe("BinaryExpression");
+      expect(bin.operator).toBe("**");
+      expect((bin.left as NumberLiteral).value).toBe(2);
+      expect((bin.right as NumberLiteral).value).toBe(3);
+    });
+
+    it("should parse ** as right-associative", () => {
+      const ast = parse("const x = 2 ** 3 ** 2");
+      const decl = ast.body[0] as VariableDeclaration;
+      const outer = decl.init as BinaryExpression;
+      expect(outer.operator).toBe("**");
+      expect((outer.left as NumberLiteral).value).toBe(2);
+      const inner = outer.right as BinaryExpression;
+      expect(inner.operator).toBe("**");
+      expect((inner.left as NumberLiteral).value).toBe(3);
+      expect((inner.right as NumberLiteral).value).toBe(2);
+    });
+
+    it("** should bind tighter than *", () => {
+      const ast = parse("const x = 2 ** 3 * 4");
+      const decl = ast.body[0] as VariableDeclaration;
+      const mul = decl.init as BinaryExpression;
+      expect(mul.operator).toBe("*");
+      const pow = mul.left as BinaryExpression;
+      expect(pow.operator).toBe("**");
+    });
+  });
+
+  describe("pipe operator", () => {
+    it("should desugar x |> f into f(x)", () => {
+      const ast = parse("5 |> double");
+      const stmt = ast.body[0] as ExpressionStatement;
+      const call = stmt.expression as CallExpression;
+      expect(call.type).toBe("CallExpression");
+      expect((call.callee as Identifier).name).toBe("double");
+      expect(call.arguments).toHaveLength(1);
+      expect((call.arguments[0] as NumberLiteral).value).toBe(5);
+    });
+
+    it("should desugar x |> f(y) into f(x, y)", () => {
+      const ast = parse("5 |> add(10)");
+      const stmt = ast.body[0] as ExpressionStatement;
+      const call = stmt.expression as CallExpression;
+      expect((call.callee as Identifier).name).toBe("add");
+      expect(call.arguments).toHaveLength(2);
+      expect((call.arguments[0] as NumberLiteral).value).toBe(5);
+      expect((call.arguments[1] as NumberLiteral).value).toBe(10);
+    });
+
+    it("should chain pipes left-to-right", () => {
+      const ast = parse("5 |> double |> toString");
+      const stmt = ast.body[0] as ExpressionStatement;
+      const outer = stmt.expression as CallExpression;
+      expect((outer.callee as Identifier).name).toBe("toString");
+      const inner = outer.arguments[0] as CallExpression;
+      expect((inner.callee as Identifier).name).toBe("double");
+      expect((inner.arguments[0] as NumberLiteral).value).toBe(5);
+    });
+  });
+
+  describe("spread operator", () => {
+    it("should parse [...arr] as ArrayLiteral with SpreadElement", () => {
+      const ast = parse("const x = [...arr]");
+      const decl = ast.body[0] as VariableDeclaration;
+      const arrLit = decl.init as ArrayLiteral;
+      expect(arrLit.elements).toHaveLength(1);
+      expect(arrLit.elements[0].type).toBe("SpreadElement");
+      expect((arrLit.elements[0] as any).argument.name).toBe("arr");
+    });
+
+    it("should parse mixed spread and normal elements", () => {
+      const ast = parse("const x = [...a, 1, ...b]");
+      const decl = ast.body[0] as VariableDeclaration;
+      const arrLit = decl.init as ArrayLiteral;
+      expect(arrLit.elements).toHaveLength(3);
+      expect(arrLit.elements[0].type).toBe("SpreadElement");
+      expect(arrLit.elements[1].type).toBe("NumberLiteral");
+      expect(arrLit.elements[2].type).toBe("SpreadElement");
+    });
+  });
+
+  describe("destructuring", () => {
+    it("should parse array destructuring", () => {
+      const ast = parse("const [a, b, c] = arr");
+      const decl = ast.body[0] as any;
+      expect(decl.type).toBe("DestructuringDeclaration");
+      expect(decl.kind).toBe("const");
+      expect(decl.pattern.kind).toBe("array");
+      expect(decl.pattern.elements).toEqual(["a", "b", "c"]);
+    });
+
+    it("should parse object destructuring", () => {
+      const ast = parse("const { name, age } = person");
+      const decl = ast.body[0] as any;
+      expect(decl.type).toBe("DestructuringDeclaration");
+      expect(decl.pattern.kind).toBe("object");
+      expect(decl.pattern.properties).toEqual(["name", "age"]);
+    });
+
+    it("should parse let destructuring", () => {
+      const ast = parse("let [x, y] = coords");
+      const decl = ast.body[0] as any;
+      expect(decl.type).toBe("DestructuringDeclaration");
+      expect(decl.kind).toBe("let");
+    });
+
+    it("should parse array destructuring with skipped elements", () => {
+      const ast = parse("const [a, , c] = arr");
+      const decl = ast.body[0] as any;
+      expect(decl.pattern.elements).toEqual(["a", null, "c"]);
+    });
+  });
+
+  // ── Batch 4 ─────────────────────────────────────────────────────────
+
+  describe("map literals", () => {
+    it("should parse empty map", () => {
+      const ast = parse("const m = Map {}");
+      const decl = ast.body[0] as VariableDeclaration;
+      expect(decl.init.type).toBe("MapLiteral");
+      expect((decl.init as any).entries).toHaveLength(0);
+    });
+
+    it("should parse map with string keys", () => {
+      const ast = parse('const m = Map { "a": 1, "b": 2 }');
+      const decl = ast.body[0] as VariableDeclaration;
+      const map = decl.init as any;
+      expect(map.type).toBe("MapLiteral");
+      expect(map.entries).toHaveLength(2);
+      expect(map.entries[0].key.type).toBe("StringLiteral");
+      expect(map.entries[0].value.type).toBe("NumberLiteral");
+    });
+
+    it("should parse map with single-quoted keys", () => {
+      const ast = parse("const m = Map { 'x': 1 }");
+      const decl = ast.body[0] as VariableDeclaration;
+      expect(decl.init.type).toBe("MapLiteral");
+    });
+  });
 });

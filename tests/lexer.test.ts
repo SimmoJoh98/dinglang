@@ -523,4 +523,54 @@ let y = 20`;
       ]);
     });
   });
+
+  // ── Batch 3 tokens ─────────────────────────────────────────────────
+
+  describe("batch 3 tokens", () => {
+    it("should lex ** (power operator)", () => {
+      expect(types("2 ** 3")).toEqual([
+        TokenType.Number, TokenType.StarStar, TokenType.Number, TokenType.EOF,
+      ]);
+    });
+
+    it("should distinguish ** from * and *=", () => {
+      expect(types("a ** b * c *= d")).toEqual([
+        TokenType.Identifier, TokenType.StarStar, TokenType.Identifier,
+        TokenType.Star, TokenType.Identifier,
+        TokenType.StarEquals, TokenType.Identifier,
+        TokenType.EOF,
+      ]);
+    });
+
+    it("should lex |> (pipe operator)", () => {
+      expect(types("x |> f")).toEqual([
+        TokenType.Identifier, TokenType.PipeGreater, TokenType.Identifier, TokenType.EOF,
+      ]);
+    });
+
+    it("should distinguish |> from || and |", () => {
+      expect(types("a |> b || c | d")).toEqual([
+        TokenType.Identifier, TokenType.PipeGreater, TokenType.Identifier,
+        TokenType.Or, TokenType.Identifier,
+        TokenType.Pipe, TokenType.Identifier,
+        TokenType.EOF,
+      ]);
+    });
+
+    it("should lex ... (spread)", () => {
+      expect(types("[...arr]")).toEqual([
+        TokenType.LeftBracket, TokenType.DotDotDot, TokenType.Identifier,
+        TokenType.RightBracket, TokenType.EOF,
+      ]);
+    });
+
+    it("should distinguish ... from .. and .", () => {
+      expect(types("a...b..c.d")).toEqual([
+        TokenType.Identifier, TokenType.DotDotDot,
+        TokenType.Identifier, TokenType.DotDot,
+        TokenType.Identifier, TokenType.Dot,
+        TokenType.Identifier, TokenType.EOF,
+      ]);
+    });
+  });
 });

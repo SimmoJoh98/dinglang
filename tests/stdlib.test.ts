@@ -240,3 +240,37 @@ log(status)`;
     expect(result).not.toContain('import { log } from "ding:std"');
   });
 });
+
+// ── ding:io ──────────────────────────────────────────────────────────
+
+describe("stdlib: ding:io", () => {
+  it("should inject readFile polyfill", () => {
+    const result = compile("import { readFile } from 'ding:io'\nreadFile('test.txt')");
+    expect(result).toContain("readFile");
+    expect(result).toContain("readFileSync");
+  });
+
+  it("should inject args polyfill", () => {
+    const result = compile("import { args } from 'ding:io'\nargs()");
+    expect(result).toContain("process.argv");
+  });
+
+  it("should inject exists polyfill", () => {
+    const result = compile("import { exists } from 'ding:io'\nexists('test.txt')");
+    expect(result).toContain("existsSync");
+  });
+});
+
+// ── ding:json ────────────────────────────────────────────────────────
+
+describe("stdlib: ding:json", () => {
+  it("should inject parse polyfill", () => {
+    const result = compile(`import { parse } from 'ding:json'\nparse('{}')`)
+    expect(result).toContain("JSON.parse");
+  });
+
+  it("should inject stringify polyfill", () => {
+    const result = compile(`import { stringify } from 'ding:json'\nstringify(data)`);
+    expect(result).toContain("JSON.stringify");
+  });
+});

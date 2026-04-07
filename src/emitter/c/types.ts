@@ -23,6 +23,8 @@ export type CType =
   // Composite / special
   | "DingValue"
   | "DingArray*"
+  | "DingMap*"
+  | "DingChannel*"
   | "void";
 
 /** Map from Ding annotation name → C type string */
@@ -80,7 +82,11 @@ export function inferCType(expr: Expression): CType {
     case "BinaryExpression": {
       const leftType = inferCType(expr.left);
       const rightType = inferCType(expr.right);
+      if (expr.operator === "**") return "ding_float";
       if (expr.operator === "+" && (leftType === "ding_string" || rightType === "ding_string")) {
+        return "ding_string";
+      }
+      if (expr.operator === "*" && (isStringType(leftType) || isStringType(rightType))) {
         return "ding_string";
       }
       if (isFloatType(leftType) || isFloatType(rightType)) {
@@ -98,6 +104,8 @@ export function inferCType(expr: Expression): CType {
     }
     case "StructInstantiation":
       return "DingValue";
+    case "MapLiteral":
+      return "DingMap*";
     case "LengthExpression":
       return "ding_int";
     default:
@@ -150,6 +158,8 @@ export function wrapAsDingValue(expr: string, cType: CType): string {
       return `(DingValue){.type=DING_STRING, .as_string=(ding_string)(${expr})}`;
     case "DingArray*":
       return `(DingValue){.type=DING_ARRAY, .as_array=${expr}}`;
+    case "DingMap*":
+      return `(DingValue){.type=DING_MAP, .as_map=${expr}}`;
     case "DingValue":
       return expr;
     default:
@@ -173,6 +183,8 @@ export function unwrapFromDingValue(expr: string, targetType: CType): string {
       return `(ding_cstring)(${expr}).as_string`;
     case "DingArray*":
       return `${expr}.as_array`;
+    case "DingMap*":
+      return `${expr}.as_map`;
     default:
       return expr;
   }

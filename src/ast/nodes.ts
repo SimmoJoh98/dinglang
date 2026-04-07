@@ -16,7 +16,12 @@ export type Statement =
   | ContinueStatement
   | StructDeclaration
   | TryCatchStatement
-  | ThrowStatement;
+  | ThrowStatement
+  | EnumDeclaration
+  | MatchStatement
+  | DestructuringDeclaration
+  | SpawnStatement
+  | TypeAliasDeclaration;
 
 export type Expression =
   | NumberLiteral
@@ -25,6 +30,7 @@ export type Expression =
   | NullLiteral
   | Identifier
   | BinaryExpression
+  | UnaryExpression
   | ArrowFunction
   | CallExpression
   | TemplateLiteral
@@ -36,7 +42,9 @@ export type Expression =
   | ErrorPropagation
   | NullishCoalescing
   | NullAssertion
-  | AssignmentExpression;
+  | AssignmentExpression
+  | MatchExpression
+  | MapLiteral;
 
 export type ASTNode = Statement | Expression;
 
@@ -107,6 +115,13 @@ export interface ArrowFunction {
 export interface Parameter {
   name: string;
   annotation?: TypeAnnotation;
+  defaultValue?: Expression;
+}
+
+export interface UnaryExpression {
+  type: "UnaryExpression";
+  operator: string;
+  operand: Expression;
 }
 
 export interface CallExpression {
@@ -165,9 +180,14 @@ export interface ContinueStatement {
 
 // ── Arrays ─────────────────────────────────────────────────────────
 
+export interface SpreadElement {
+  type: "SpreadElement";
+  argument: Expression;
+}
+
 export interface ArrayLiteral {
   type: "ArrayLiteral";
-  elements: Expression[];
+  elements: (Expression | SpreadElement)[];
 }
 
 export interface ArrayAccess {
@@ -255,4 +275,82 @@ export interface AssignmentExpression {
   type: "AssignmentExpression";
   target: Expression;
   value: Expression;
+}
+
+// ── Enums ─────────────────────────────────────────────────────────
+
+export interface EnumDeclaration {
+  type: "EnumDeclaration";
+  name: string;
+  members: EnumMember[];
+}
+
+export interface EnumMember {
+  name: string;
+  value?: Expression;
+}
+
+// ── Match ─────────────────────────────────────────────────────────
+
+export type MatchPattern =
+  | { kind: "literal"; value: Expression }
+  | { kind: "range"; start: Expression; end: Expression }
+  | { kind: "wildcard" };
+
+export interface MatchArm {
+  pattern: MatchPattern;
+  body: Statement[] | Expression;
+}
+
+export interface MatchExpression {
+  type: "MatchExpression";
+  subject: Expression;
+  arms: MatchArm[];
+}
+
+export interface MatchStatement {
+  type: "MatchStatement";
+  subject: Expression;
+  arms: MatchArm[];
+}
+
+// ── Destructuring ─────────────────────────────────────────────────
+
+export interface ArrayDestructurePattern {
+  kind: "array";
+  elements: (string | null)[];
+}
+
+export interface ObjectDestructurePattern {
+  kind: "object";
+  properties: string[];
+}
+
+export interface DestructuringDeclaration {
+  type: "DestructuringDeclaration";
+  kind: "const" | "let";
+  pattern: ArrayDestructurePattern | ObjectDestructurePattern;
+  init: Expression;
+}
+
+// ── Type aliases ──────────────────────────────────────────────────
+
+export interface TypeAliasDeclaration {
+  type: "TypeAliasDeclaration";
+  name: string;
+  alias: TypeAnnotation;
+}
+
+// ── Concurrency ───────────────────────────────────────────────────
+
+export interface SpawnStatement {
+  type: "SpawnStatement";
+  body: Expression; // ArrowFunction or CallExpression
+}
+
+// ── Maps ──────────────────────────────────────────────────────────
+
+export interface MapLiteral {
+  type: "MapLiteral";
+  entries: { key: Expression; value: Expression }[];
 }

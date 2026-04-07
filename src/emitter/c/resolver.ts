@@ -29,6 +29,9 @@ import type {
   TypeAnnotation,
   ImportDeclaration,
   Identifier,
+  EnumDeclaration,
+  MatchArm,
+  DestructuringDeclaration,
 } from "../../ast/nodes.js";
 import {
   mapAnnotationToCType,
@@ -38,7 +41,7 @@ import {
   isStringType,
   type CType,
 } from "./types.js";
-import { C_STD_FUNCTION_MAP, C_MATH_FUNCTION_MAP } from "./stdlib.js";
+import { C_STD_FUNCTION_MAP, C_MATH_FUNCTION_MAP, C_STRING_METHOD_MAP, C_IO_FUNCTION_MAP, C_JSON_FUNCTION_MAP, C_HTTP_FUNCTION_MAP, C_CONCURRENT_FUNCTION_MAP } from "./stdlib.js";
 
 /** What a CallExpression actually calls. */
 export type CallTarget =
@@ -73,6 +76,17 @@ export type CallTarget =
       op: "push";
       receiverIsDingValue: boolean; // need to unwrap .as_array?
       elementType: CType;            // for wrapping the argument
+    }
+  | {
+      kind: "array-method";
+      op: "map" | "filter" | "forEach" | "reduce" | "find" | "includes";
+      receiverIsDingValue: boolean;
+      callback?: ArrowFunction;      // for map/filter/forEach/reduce/find
+      initialValue?: Expression;      // for reduce's second argument
+    }
+  | {
+      kind: "map-builtin";
+      op: "has" | "keys" | "values" | "delete";
     };
 
 export interface FunctionSignature {
@@ -81,18 +95,33 @@ export interface FunctionSignature {
   returnType: CType;
 }
 
-type Scope = Map<string, CType>;
+interface ScopeFrame {
+  vars: Map<string, CType>;
+  isFunctionBoundary: boolean;
+}
+
+export interface CaptureInfo {
+  captures: Map<string, CType>; // variable name → type
+  envStructName: string;        // generated name: __closure_env_0
+}
 
 export class Resolver {
   readonly exprTypes: WeakMap<Expression, CType> = new WeakMap();
   readonly callTargets: WeakMap<CallExpression, CallTarget> = new WeakMap();
-  /** Identifier nodes that were resolved to a top-level global binding
-   *  (i.e. not shadowed by any local in scope at that use site).
-   *  The emitter uses this to decide whether to name-mangle with the
-   *  ding_g_ prefix at each reference. */
+  /** Identifier nodes that were resolved to a top-level global binding */
   readonly globalRefs: WeakSet<Identifier> = new WeakSet();
+  /** Closure capture info: which variables each closure captures. */
+  readonly closureInfos: WeakMap<ArrowFunction, CaptureInfo> = new WeakMap();
+  /** Quick check: does this arrow function capture variables? */
+  readonly isClosure: WeakSet<ArrowFunction> = new WeakSet();
+  /** For each enclosing function, which of its locals are captured by inner closures. */
+  readonly escapedVars: WeakMap<ArrowFunction, Set<string>> = new WeakMap();
+  private closureCounter: number = 0;
+  /** Stack of ArrowFunction nodes we're currently inside (for capture tracking). */
+  private fnStack: ArrowFunction[] = [];
 
   readonly structs: Map<string, StructDeclaration> = new Map();
+  readonly enums: Map<string, EnumDeclaration> = new Map();
   readonly functions: Map<string, FunctionSignature> = new Map();
   /** Top-level variable bindings (non-function). Emitted as C globals. */
   readonly globals: Map<string, CType> = new Map();
@@ -103,13 +132,22 @@ export class Resolver {
   readonly globalOrder: string[] = [];
   readonly stdRenames: Map<string, string> = new Map();
   readonly mathRenames: Map<string, string> = new Map();
+  readonly ioRenames: Map<string, string> = new Map();
+  readonly jsonRenames: Map<string, string> = new Map();
+  readonly httpRenames: Map<string, string> = new Map();
+  readonly concurrentRenames: Map<string, string> = new Map();
   importedStd: boolean = false;
   importedMath: boolean = false;
+  importedIo: boolean = false;
+  importedJson: boolean = false;
+  importedHttp: boolean = false;
+  importedConcurrent: boolean = false;
+  readonly typeAliases: Map<string, CType> = new Map();
 
   /** Scope stack. The outermost frame is the file/module scope; globals
    *  live in `globals`, not on this stack, so that local declarations
    *  can properly shadow them without mutating global state. */
-  private scopes: Scope[] = [new Map()];
+  private scopes: ScopeFrame[] = [{ vars: new Map(), isFunctionBoundary: false }];
 
   // ── Public entry point ────────────────────────────────────────────
 
@@ -126,6 +164,12 @@ export class Resolver {
     for (const stmt of program.body) {
       if (stmt.type === "StructDeclaration") {
         this.structs.set(stmt.name, stmt);
+      }
+      if (stmt.type === "TypeAliasDeclaration") {
+        this.typeAliases.set(stmt.name, mapAnnotationToCType(stmt.alias));
+      }
+      if (stmt.type === "EnumDeclaration") {
+        this.enums.set(stmt.name, stmt);
       }
       if (stmt.type === "ImportDeclaration") {
         this.collectImport(stmt);
@@ -163,7 +207,7 @@ export class Resolver {
     if (!this.globals.has(name)) return false;
     // If any active scope declares this name, it's shadowed → treat as local.
     for (let i = this.scopes.length - 1; i >= 0; i--) {
-      if (this.scopes[i].has(name)) return false;
+      if (this.scopes[i].vars.has(name)) return false;
     }
     return true;
   }
@@ -186,8 +230,8 @@ export class Resolver {
 
   // ── Scope management ──────────────────────────────────────────────
 
-  private pushScope(): void {
-    this.scopes.push(new Map());
+  private pushScope(isFunctionBoundary: boolean = false): void {
+    this.scopes.push({ vars: new Map(), isFunctionBoundary });
   }
 
   private popScope(): void {
@@ -195,12 +239,49 @@ export class Resolver {
   }
 
   private declare(name: string, type: CType): void {
-    this.scopes[this.scopes.length - 1].set(name, type);
+    this.scopes[this.scopes.length - 1].vars.set(name, type);
   }
 
   private lookupVar(name: string): CType | undefined {
     for (let i = this.scopes.length - 1; i >= 0; i--) {
-      const hit = this.scopes[i].get(name);
+      const hit = this.scopes[i].vars.get(name);
+      if (hit) return hit;
+    }
+    return undefined;
+  }
+
+  /** Look up a variable, and if it crosses a function boundary, record it as captured. */
+  private lookupVarWithCapture(name: string, identNode?: Identifier): CType | undefined {
+    let crossedBoundary = false;
+    for (let i = this.scopes.length - 1; i >= 0; i--) {
+      if (i < this.scopes.length - 1 && this.scopes[i + 1].isFunctionBoundary) {
+        crossedBoundary = true;
+      }
+      const hit = this.scopes[i].vars.get(name);
+      if (hit && crossedBoundary && this.fnStack.length > 0) {
+        // This variable is captured from an outer scope
+        const currentFn = this.fnStack[this.fnStack.length - 1];
+        let info = this.closureInfos.get(currentFn);
+        if (!info) {
+          info = { captures: new Map(), envStructName: `__closure_env_${this.closureCounter++}` };
+          this.closureInfos.set(currentFn, info);
+          this.isClosure.add(currentFn);
+        }
+        info.captures.set(name, hit);
+
+        // Mark the variable as escaped in the enclosing function
+        for (let f = this.fnStack.length - 2; f >= 0; f--) {
+          const outerFn = this.fnStack[f];
+          let escaped = this.escapedVars.get(outerFn);
+          if (!escaped) {
+            escaped = new Set();
+            this.escapedVars.set(outerFn, escaped);
+          }
+          escaped.add(name);
+          break; // only immediate parent needs to know
+        }
+        return hit;
+      }
       if (hit) return hit;
     }
     return undefined;
@@ -226,11 +307,34 @@ export class Resolver {
       if (node.default) register(node.default, C_MATH_FUNCTION_MAP, this.mathRenames);
       for (const n of node.named) register(n, C_MATH_FUNCTION_MAP, this.mathRenames);
     }
+    if (node.source === "ding:io") {
+      this.importedIo = true;
+      if (node.default) register(node.default, C_IO_FUNCTION_MAP, this.ioRenames);
+      for (const n of node.named) register(n, C_IO_FUNCTION_MAP, this.ioRenames);
+    }
+    if (node.source === "ding:json") {
+      this.importedJson = true;
+      if (node.default) register(node.default, C_JSON_FUNCTION_MAP, this.jsonRenames);
+      for (const n of node.named) register(n, C_JSON_FUNCTION_MAP, this.jsonRenames);
+    }
+    if (node.source === "ding:http") {
+      this.importedHttp = true;
+      if (node.default) register(node.default, C_HTTP_FUNCTION_MAP, this.httpRenames);
+      for (const n of node.named) register(n, C_HTTP_FUNCTION_MAP, this.httpRenames);
+    }
+    if (node.source === "ding:concurrent") {
+      this.importedConcurrent = true;
+      if (node.default) register(node.default, C_CONCURRENT_FUNCTION_MAP, this.concurrentRenames);
+      for (const n of node.named) register(n, C_CONCURRENT_FUNCTION_MAP, this.concurrentRenames);
+    }
   }
 
   // ── Type helpers ──────────────────────────────────────────────────
 
   private annotationType(ann: TypeAnnotation | undefined): CType {
+    if (ann && this.typeAliases.has(ann.name)) {
+      return this.typeAliases.get(ann.name)!;
+    }
     return mapAnnotationToCType(ann);
   }
 
@@ -317,10 +421,37 @@ export class Resolver {
       case "ThrowStatement":
         this.visitExpression(stmt.value);
         return;
+      case "EnumDeclaration":
+        return; // collected in pass 1
+      case "MatchStatement": {
+        this.visitExpression(stmt.subject);
+        for (const arm of stmt.arms) this.visitMatchArm(arm);
+        return;
+      }
+      case "DestructuringDeclaration":
+        return this.visitDestructuringDeclaration(stmt);
+      case "SpawnStatement":
+        this.visitExpression(stmt.body);
+        return;
+      case "TypeAliasDeclaration":
+        return; // collected in pass 1
       case "ImportDeclaration":
       case "BreakStatement":
       case "ContinueStatement":
         return;
+    }
+  }
+
+  private visitMatchArm(arm: MatchArm): void {
+    if (arm.pattern.kind === "literal") this.visitExpression(arm.pattern.value);
+    if (arm.pattern.kind === "range") {
+      this.visitExpression(arm.pattern.start);
+      this.visitExpression(arm.pattern.end);
+    }
+    if (Array.isArray(arm.body)) {
+      this.visitBlock(arm.body);
+    } else {
+      this.visitExpression(arm.body);
     }
   }
 
@@ -352,6 +483,7 @@ export class Resolver {
     // ArrayLiteral / StructInstantiation bind to pointer types even though
     // their expression type is DingValue/DingArray*.
     if (node.init.type === "ArrayLiteral") varType = "DingArray*";
+    if (node.init.type === "MapLiteral") varType = "DingMap*";
     if (node.init.type === "StructInstantiation") varType = `${node.init.name}*` as CType;
 
     // If this is the top-level declaration we registered as a global in
@@ -365,8 +497,35 @@ export class Resolver {
     this.declare(node.name, varType);
   }
 
+  private visitDestructuringDeclaration(node: DestructuringDeclaration): void {
+    this.visitExpression(node.init);
+    const initType = this.typeOf(node.init);
+
+    if (node.pattern.kind === "array") {
+      for (const name of node.pattern.elements) {
+        if (name !== null) this.declare(name, "DingValue");
+      }
+    } else {
+      // Object destructuring — try to resolve field types from struct
+      let structDecl: StructDeclaration | undefined;
+      if (typeof initType === "string" && initType.endsWith("*")) {
+        const base = initType.slice(0, -1);
+        structDecl = this.structs.get(base);
+      }
+      for (const prop of node.pattern.properties) {
+        let fieldCType: CType = "DingValue";
+        if (structDecl) {
+          const field = structDecl.fields.find((f) => f.name === prop);
+          if (field) fieldCType = this.fieldType(field.fieldType);
+        }
+        this.declare(prop, fieldCType);
+      }
+    }
+  }
+
   private visitArrowFunction(fn: ArrowFunction, knownReturnType?: CType): void {
-    this.pushScope();
+    this.pushScope(true); // function boundary
+    this.fnStack.push(fn);
     for (const p of fn.params) {
       this.declare(p.name, this.annotationType(p.annotation));
     }
@@ -375,6 +534,7 @@ export class Resolver {
     } else {
       this.visitExpression(fn.body);
     }
+    this.fnStack.pop();
     this.popScope();
     void knownReturnType;
   }
@@ -420,7 +580,9 @@ export class Resolver {
       case "NullLiteral":
         return "DingValue";
       case "Identifier": {
-        const known = this.lookupVar(expr.name);
+        const known = this.fnStack.length > 0
+          ? this.lookupVarWithCapture(expr.name, expr)
+          : this.lookupVar(expr.name);
         if (known) return known;
         // Not a local → check top-level globals (non-function bindings).
         // Record this specific node so the emitter knows to mangle its
@@ -439,10 +601,18 @@ export class Resolver {
         const lt = this.visitExpression(expr.left);
         const rt = this.visitExpression(expr.right);
         const isComp = ["==", "!=", "<", ">", "<=", ">="].includes(expr.operator);
-        if (isComp) return "ding_bool";
+        const isLogical = ["&&", "||"].includes(expr.operator);
+        if (isComp || isLogical) return "ding_bool";
+        if (expr.operator === "**") return "ding_float";
         if (expr.operator === "+" && (isStringType(lt) || isStringType(rt))) {
           return "ding_string";
         }
+        if (expr.operator === "*" && (isStringType(lt) || isStringType(rt))) {
+          return "ding_string";
+        }
+        // Bitwise operators always return integer
+        const isBitwise = ["&", "|", "^", "<<", ">>"].includes(expr.operator);
+        if (isBitwise) return "ding_int";
         if (isFloatType(lt) || isFloatType(rt)) return "ding_float";
         if (isIntegerType(lt) && isIntegerType(rt)) return "ding_int";
         // Mixed with DingValue → result as ding_int (emitter unwraps operands).
@@ -452,13 +622,36 @@ export class Resolver {
         }
         return "DingValue";
       }
+      case "UnaryExpression": {
+        const operandType = this.visitExpression(expr.operand);
+        if (expr.operator === "!") return "ding_bool";
+        if (expr.operator === "~") return "ding_int";
+        if (expr.operator === "-") return operandType;
+        return operandType;
+      }
       case "CallExpression": {
         this.visitExpression(expr.callee);
         for (const a of expr.arguments) this.visitExpression(a);
         const target = this.resolveCallTarget(expr);
         if (target) {
           this.callTargets.set(expr, target);
-          return target.kind === "array-builtin" ? "void" : target.returnType;
+          if (target.kind === "array-builtin") return "void";
+          if (target.kind === "array-method") {
+            switch (target.op) {
+              case "map": case "filter": return "DingArray*";
+              case "forEach": return "void";
+              case "reduce": case "find": return "DingValue";
+              case "includes": return "ding_bool";
+            }
+          }
+          if (target.kind === "map-builtin") {
+            switch (target.op) {
+              case "has": return "ding_bool";
+              case "keys": case "values": return "DingArray*";
+              case "delete": return "void";
+            }
+          }
+          return target.returnType;
         }
         return "DingValue";
       }
@@ -469,8 +662,21 @@ export class Resolver {
         return "ding_string";
       }
       case "ArrayLiteral": {
-        for (const el of expr.elements) this.visitExpression(el);
+        for (const el of expr.elements) {
+          if (el.type === "SpreadElement") {
+            this.visitExpression(el.argument);
+          } else {
+            this.visitExpression(el);
+          }
+        }
         return "DingArray*";
+      }
+      case "MapLiteral": {
+        for (const entry of expr.entries) {
+          this.visitExpression(entry.key);
+          this.visitExpression(entry.value);
+        }
+        return "DingMap*";
       }
       case "ArrayAccess": {
         this.visitExpression(expr.array);
@@ -483,6 +689,10 @@ export class Resolver {
         return "ding_int";
       }
       case "MemberExpression": {
+        // Enum access: Color.Red → ding_int
+        if (expr.object.type === "Identifier" && this.enums.has(expr.object.name)) {
+          return "ding_int";
+        }
         const objType = this.visitExpression(expr.object);
         // Struct pointer field access.
         if (typeof objType === "string" && objType.endsWith("*")) {
@@ -519,6 +729,11 @@ export class Resolver {
       case "ArrowFunction":
         this.visitArrowFunction(expr);
         return "DingValue";
+      case "MatchExpression": {
+        this.visitExpression(expr.subject);
+        for (const arm of expr.arms) this.visitMatchArm(arm);
+        return "DingValue";
+      }
     }
   }
 
@@ -530,6 +745,19 @@ export class Resolver {
       const receiverType = this.visitExpression(call.callee.object);
       const method = call.callee.property;
 
+      // String method calls
+      if (isStringType(receiverType)) {
+        const strMethod = C_STRING_METHOD_MAP[method];
+        if (strMethod) {
+          return {
+            kind: "std",
+            cName: strMethod.cName,
+            paramTypes: call.arguments.map(() => "ding_string" as CType),
+            returnType: strMethod.returnType as CType,
+          };
+        }
+      }
+
       // Array builtins on either DingArray* or a DingValue-wrapped array.
       if (receiverType === "DingArray*" || receiverType === "DingValue") {
         if (method === "push" && call.arguments.length === 1) {
@@ -539,6 +767,57 @@ export class Resolver {
             op: "push",
             receiverIsDingValue: receiverType === "DingValue",
             elementType,
+          };
+        }
+        const arrayMethods = ["map", "filter", "forEach", "reduce", "find", "includes"] as const;
+        type ArrayMethodOp = typeof arrayMethods[number];
+        if (arrayMethods.includes(method as ArrayMethodOp)) {
+          const op = method as ArrayMethodOp;
+          let callback: ArrowFunction | undefined;
+          let initialValue: Expression | undefined;
+          if (op !== "includes" && call.arguments.length >= 1 && call.arguments[0].type === "ArrowFunction") {
+            callback = call.arguments[0];
+            this.visitArrowFunction(callback);
+          }
+          if (op === "reduce" && call.arguments.length >= 2) {
+            initialValue = call.arguments[1];
+            this.visitExpression(initialValue);
+          }
+          if (op === "includes" && call.arguments.length >= 1) {
+            this.visitExpression(call.arguments[0]);
+          }
+          return {
+            kind: "array-method",
+            op,
+            receiverIsDingValue: receiverType === "DingValue",
+            callback,
+            initialValue,
+          };
+        }
+      }
+
+      // Channel methods
+      if (receiverType === "DingChannel*") {
+        if (method === "send" || method === "receive") {
+          for (const a of call.arguments) this.visitExpression(a);
+          return {
+            kind: "std",
+            cName: method === "send" ? "ding_channel_send" : "ding_channel_receive",
+            paramTypes: method === "send" ? ["DingChannel*" as CType, "DingValue"] : ["DingChannel*" as CType],
+            returnType: method === "send" ? "void" : "DingValue",
+          };
+        }
+      }
+
+      // Map methods
+      if (receiverType === "DingMap*" || receiverType === "DingValue") {
+        const mapMethods = ["has", "keys", "values", "delete"] as const;
+        type MapMethodOp = typeof mapMethods[number];
+        if (mapMethods.includes(method as MapMethodOp)) {
+          for (const a of call.arguments) this.visitExpression(a);
+          return {
+            kind: "map-builtin",
+            op: method as MapMethodOp,
           };
         }
       }
@@ -597,6 +876,53 @@ export class Resolver {
           cName,
           paramTypes: call.arguments.map(() => "ding_float" as CType),
           returnType: "ding_float",
+        };
+      }
+      if (this.ioRenames.has(name)) {
+        const cName = this.ioRenames.get(name)!;
+        // IO function return types vary
+        const retTypes: Record<string, CType> = {
+          ding_io_readFile: "ding_string",
+          ding_io_writeFile: "void",
+          ding_io_appendFile: "void",
+          ding_io_readLine: "ding_string",
+          ding_io_args: "DingArray*",
+          ding_io_exists: "ding_bool",
+        };
+        return {
+          kind: "std",
+          cName,
+          paramTypes: call.arguments.map(() => "ding_string" as CType),
+          returnType: retTypes[cName] ?? "DingValue",
+        };
+      }
+      if (this.jsonRenames.has(name)) {
+        const cName = this.jsonRenames.get(name)!;
+        return {
+          kind: "std",
+          cName,
+          paramTypes: cName === "ding_json_parse"
+            ? ["ding_string" as CType]
+            : ["DingValue" as CType],
+          returnType: cName === "ding_json_parse" ? "DingValue" : "ding_string",
+        };
+      }
+      if (this.httpRenames.has(name)) {
+        const cName = this.httpRenames.get(name)!;
+        return {
+          kind: "std",
+          cName,
+          paramTypes: call.arguments.map(() => "ding_string" as CType),
+          returnType: "ding_string",
+        };
+      }
+      if (this.concurrentRenames.has(name)) {
+        const cName = this.concurrentRenames.get(name)!;
+        return {
+          kind: "std",
+          cName,
+          paramTypes: [],
+          returnType: "DingChannel*" as CType,
         };
       }
       const userFn = this.functions.get(name);

@@ -79,7 +79,7 @@ export type CallTarget =
     }
   | {
       kind: "array-method";
-      op: "map" | "filter" | "forEach" | "reduce" | "find" | "includes";
+      op: "map" | "filter" | "forEach" | "reduce" | "find" | "includes" | "some" | "every";
       receiverIsDingValue: boolean;
       callback?: ArrowFunction;      // for map/filter/forEach/reduce/find
       initialValue?: Expression;      // for reduce's second argument
@@ -641,7 +641,7 @@ export class Resolver {
               case "map": case "filter": return "DingArray*";
               case "forEach": return "void";
               case "reduce": case "find": return "DingValue";
-              case "includes": return "ding_bool";
+              case "includes": case "some": case "every": return "ding_bool";
             }
           }
           if (target.kind === "map-builtin") {
@@ -769,8 +769,25 @@ export class Resolver {
             elementType,
           };
         }
-        const arrayMethods = ["map", "filter", "forEach", "reduce", "find", "includes"] as const;
+        const arrayMethods = ["map", "filter", "forEach", "reduce", "find", "includes", "some", "every"] as const;
         type ArrayMethodOp = typeof arrayMethods[number];
+        // Simple array methods (no callbacks)
+        const simpleArrayMethods = ["reverse", "join", "indexOf", "slice"];
+        if (simpleArrayMethods.includes(method)) {
+          for (const a of call.arguments) this.visitExpression(a);
+          const retTypes: Record<string, CType> = {
+            reverse: "DingArray*",
+            join: "ding_string",
+            indexOf: "ding_int",
+            slice: "DingArray*",
+          };
+          return {
+            kind: "std",
+            cName: `ding_array_${method}`,
+            paramTypes: call.arguments.map(() => "DingValue" as CType),
+            returnType: retTypes[method] ?? "DingValue",
+          };
+        }
         if (arrayMethods.includes(method as ArrayMethodOp)) {
           const op = method as ArrayMethodOp;
           let callback: ArrowFunction | undefined;
@@ -888,6 +905,9 @@ export class Resolver {
           ding_io_readLine: "ding_string",
           ding_io_args: "DingArray*",
           ding_io_exists: "ding_bool",
+          ding_io_env: "ding_string",
+          ding_io_exit: "void",
+          ding_io_cwd: "ding_string",
         };
         return {
           kind: "std",

@@ -32,6 +32,18 @@ ding_float ding_math_min(ding_float a, ding_float b) { return a < b ? a : b; }
 ding_float ding_math_max(ding_float a, ding_float b) { return a > b ? a : b; }
 ding_float ding_math_pow(ding_float a, ding_float b) { return pow(a, b); }
 ding_float ding_math_sqrt(ding_float n) { return sqrt(n); }
+ding_float ding_math_sin(ding_float n)  { return sin(n); }
+ding_float ding_math_cos(ding_float n)  { return cos(n); }
+ding_float ding_math_tan(ding_float n)  { return tan(n); }
+ding_float ding_math_atan2(ding_float y, ding_float x) { return atan2(y, x); }
+ding_float ding_math_log2(ding_float n)  { return log2(n); }
+ding_float ding_math_log10(ding_float n) { return log10(n); }
+ding_float ding_math_sign(ding_float n)  { return (n > 0) - (n < 0); }
+ding_float ding_math_clamp(ding_float val, ding_float lo, ding_float hi) {
+  if (val < lo) return lo;
+  if (val > hi) return hi;
+  return val;
+}
 `;
 
 export const C_STRING_METHODS = `\
@@ -188,6 +200,116 @@ ding_string ding_string_replace(ding_string s, ding_string old, ding_string new_
   memcpy(result + prefix_len + new_len, found + old_len, suffix_len + 1);
   return result;
 }
+
+ding_string ding_string_replaceAll(ding_string s, ding_string old, ding_string new_str) {
+  size_t old_len = strlen(old);
+  if (old_len == 0) {
+    size_t len = strlen(s);
+    ding_string result = (ding_string)ding_alloc(len + 1);
+    memcpy(result, s, len + 1);
+    return result;
+  }
+  // Count occurrences
+  size_t count = 0;
+  char* scan = s;
+  while ((scan = strstr(scan, old)) != NULL) { count++; scan += old_len; }
+  if (count == 0) {
+    size_t len = strlen(s);
+    ding_string result = (ding_string)ding_alloc(len + 1);
+    memcpy(result, s, len + 1);
+    return result;
+  }
+  size_t new_len = strlen(new_str);
+  size_t slen = strlen(s);
+  size_t total = slen + count * (new_len - old_len);
+  ding_string result = (ding_string)ding_alloc(total + 1);
+  char* src = s;
+  char* dst = result;
+  char* found;
+  while ((found = strstr(src, old)) != NULL) {
+    size_t prefix = found - src;
+    memcpy(dst, src, prefix);
+    dst += prefix;
+    memcpy(dst, new_str, new_len);
+    dst += new_len;
+    src = found + old_len;
+  }
+  strcpy(dst, src);
+  return result;
+}
+
+ding_string ding_string_charAt(ding_string s, ding_int idx) {
+  ding_int len = (ding_int)strlen(s);
+  if (idx < 0 || idx >= len) {
+    ding_string empty = (ding_string)ding_alloc(1);
+    empty[0] = '\\0';
+    return empty;
+  }
+  ding_string result = (ding_string)ding_alloc(2);
+  result[0] = s[idx];
+  result[1] = '\\0';
+  return result;
+}
+
+ding_int ding_string_charCodeAt(ding_string s, ding_int idx) {
+  ding_int len = (ding_int)strlen(s);
+  if (idx < 0 || idx >= len) return -1;
+  return (ding_int)(unsigned char)s[idx];
+}
+
+ding_string ding_string_padStart(ding_string s, ding_int targetLen, ding_string fill) {
+  ding_int slen = (ding_int)strlen(s);
+  if (slen >= targetLen) {
+    ding_string result = (ding_string)ding_alloc(slen + 1);
+    memcpy(result, s, slen + 1);
+    return result;
+  }
+  ding_int fillLen = (ding_int)strlen(fill);
+  if (fillLen == 0) fillLen = 1;
+  ding_int padLen = targetLen - slen;
+  ding_string result = (ding_string)ding_alloc(targetLen + 1);
+  for (ding_int i = 0; i < padLen; i++) {
+    result[i] = fill[i % fillLen];
+  }
+  memcpy(result + padLen, s, slen + 1);
+  return result;
+}
+
+ding_string ding_string_padEnd(ding_string s, ding_int targetLen, ding_string fill) {
+  ding_int slen = (ding_int)strlen(s);
+  if (slen >= targetLen) {
+    ding_string result = (ding_string)ding_alloc(slen + 1);
+    memcpy(result, s, slen + 1);
+    return result;
+  }
+  ding_int fillLen = (ding_int)strlen(fill);
+  if (fillLen == 0) fillLen = 1;
+  ding_int padLen = targetLen - slen;
+  ding_string result = (ding_string)ding_alloc(targetLen + 1);
+  memcpy(result, s, slen);
+  for (ding_int i = 0; i < padLen; i++) {
+    result[slen + i] = fill[i % fillLen];
+  }
+  result[targetLen] = '\\0';
+  return result;
+}
+
+ding_string ding_string_trimStart(ding_string s) {
+  while (*s == ' ' || *s == '\\t' || *s == '\\n' || *s == '\\r') s++;
+  size_t len = strlen(s);
+  ding_string result = (ding_string)ding_alloc(len + 1);
+  memcpy(result, s, len + 1);
+  return result;
+}
+
+ding_string ding_string_trimEnd(ding_string s) {
+  size_t len = strlen(s);
+  while (len > 0 && (s[len-1] == ' ' || s[len-1] == '\\t' || s[len-1] == '\\n' || s[len-1] == '\\r')) len--;
+  ding_string result = (ding_string)ding_alloc(len + 1);
+  memcpy(result, s, len);
+  result[len] = '\\0';
+  return result;
+}
 `;
 
 /** Map of string method names to their C function names */
@@ -202,7 +324,71 @@ export const C_STRING_METHOD_MAP: Record<string, { cName: string; returnType: st
   toLowerCase: { cName: "ding_string_toLowerCase", returnType: "ding_string" },
   split: { cName: "ding_string_split", returnType: "DingArray*" },
   replace: { cName: "ding_string_replace", returnType: "ding_string" },
+  replaceAll: { cName: "ding_string_replaceAll", returnType: "ding_string" },
+  charAt: { cName: "ding_string_charAt", returnType: "ding_string" },
+  charCodeAt: { cName: "ding_string_charCodeAt", returnType: "ding_int" },
+  padStart: { cName: "ding_string_padStart", returnType: "ding_string" },
+  padEnd: { cName: "ding_string_padEnd", returnType: "ding_string" },
+  trimStart: { cName: "ding_string_trimStart", returnType: "ding_string" },
+  trimEnd: { cName: "ding_string_trimEnd", returnType: "ding_string" },
 };
+
+export const C_ARRAY_EXTRA_METHODS = `\
+// ── Array extra methods ────────────────────────────────────────────
+
+DingArray* ding_array_reverse(DingArray* arr) {
+  DingArray* result = ding_array_new();
+  for (ding_int i = arr->length - 1; i >= 0; i--) {
+    ding_array_push(result, arr->items[i]);
+  }
+  return result;
+}
+
+ding_string ding_array_join(DingArray* arr, ding_string sep) {
+  if (arr->length == 0) {
+    ding_string empty = (ding_string)ding_alloc(1);
+    empty[0] = '\\0';
+    return empty;
+  }
+  size_t sepLen = strlen(sep);
+  // First pass: compute total size
+  size_t total = 0;
+  for (ding_int i = 0; i < arr->length; i++) {
+    ding_string s = ding_value_to_string(arr->items[i]);
+    total += strlen(s);
+    if (i > 0) total += sepLen;
+  }
+  ding_string result = (ding_string)ding_alloc(total + 1);
+  size_t pos = 0;
+  for (ding_int i = 0; i < arr->length; i++) {
+    if (i > 0) { memcpy(result + pos, sep, sepLen); pos += sepLen; }
+    ding_string s = ding_value_to_string(arr->items[i]);
+    size_t slen = strlen(s);
+    memcpy(result + pos, s, slen);
+    pos += slen;
+  }
+  result[pos] = '\\0';
+  return result;
+}
+
+ding_int ding_array_indexOf(DingArray* arr, DingValue val) {
+  for (ding_int i = 0; i < arr->length; i++) {
+    if (ding_value_equals(arr->items[i], val)) return i;
+  }
+  return -1;
+}
+
+DingArray* ding_array_slice(DingArray* arr, ding_int start, ding_int end) {
+  if (start < 0) start = 0;
+  if (end > arr->length) end = arr->length;
+  if (start >= end) return ding_array_new();
+  DingArray* result = ding_array_new();
+  for (ding_int i = start; i < end; i++) {
+    ding_array_push(result, arr->items[i]);
+  }
+  return result;
+}
+`;
 
 export const C_MAP_RUNTIME = `\
 // ── Map runtime (hash table, string keys) ─────────────────────────
@@ -394,6 +580,31 @@ ding_bool ding_io_exists(ding_string path) {
   FILE* f = fopen(path, "r");
   if (f) { fclose(f); return true; }
   return false;
+}
+
+ding_string ding_io_env(ding_string name) {
+  char* val = getenv(name);
+  if (!val) {
+    ding_string empty = (ding_string)ding_alloc(1);
+    empty[0] = '\\0';
+    return empty;
+  }
+  size_t len = strlen(val);
+  ding_string result = (ding_string)ding_alloc(len + 1);
+  memcpy(result, val, len + 1);
+  return result;
+}
+
+void ding_io_exit(ding_int code) {
+  exit((int)code);
+}
+
+ding_string ding_io_cwd() {
+  ding_string buf = (ding_string)ding_alloc(4096);
+  if (!getcwd(buf, 4096)) {
+    buf[0] = '\\0';
+  }
+  return buf;
 }
 `;
 
@@ -755,6 +966,9 @@ export const C_IO_FUNCTION_MAP: Record<string, string> = {
   readLine: "ding_io_readLine",
   args: "ding_io_args",
   exists: "ding_io_exists",
+  env: "ding_io_env",
+  exit: "ding_io_exit",
+  cwd: "ding_io_cwd",
 };
 
 export const C_JSON_FUNCTION_MAP: Record<string, string> = {
@@ -778,4 +992,12 @@ export const C_MATH_FUNCTION_MAP: Record<string, string> = {
   max: "ding_math_max",
   pow: "ding_math_pow",
   sqrt: "ding_math_sqrt",
+  sin: "ding_math_sin",
+  cos: "ding_math_cos",
+  tan: "ding_math_tan",
+  atan2: "ding_math_atan2",
+  log2: "ding_math_log2",
+  log10: "ding_math_log10",
+  sign: "ding_math_sign",
+  clamp: "ding_math_clamp",
 };

@@ -37,7 +37,7 @@ import type {
 } from "../../ast/nodes.js";
 import { C_RUNTIME } from "./runtime.js";
 import { cArena, DEFAULT_ARENA_SIZE } from "./arena.js";
-import { C_STDLIB_STD, C_STDLIB_MATH, C_STRING_METHODS, C_STRING_METHOD_MAP, C_MAP_RUNTIME, C_STDLIB_IO, C_STDLIB_JSON, C_STDLIB_HTTP, C_STDLIB_CONCURRENT } from "./stdlib.js";
+import { C_STDLIB_STD, C_STDLIB_MATH, C_STRING_METHODS, C_STRING_METHOD_MAP, C_ARRAY_EXTRA_METHODS, C_MAP_RUNTIME, C_STDLIB_IO, C_STDLIB_JSON, C_STDLIB_HTTP, C_STDLIB_CONCURRENT } from "./stdlib.js";
 import {
   inferCType,
   mapAnnotationToCType,
@@ -113,6 +113,9 @@ export class CEmitter {
 
     // String methods — always included (small overhead, widely useful)
     sections.push(C_STRING_METHODS);
+
+    // Array extra methods — always included
+    sections.push(C_ARRAY_EXTRA_METHODS);
 
     // Map runtime — always included
     sections.push(C_MAP_RUNTIME);
@@ -955,6 +958,21 @@ export class CEmitter {
           const wrapped = wrapAsDingValue(argExpr, argType);
           return `ding_array_push(${arrExpr}, ${wrapped})`;
         }
+        // Simple array methods (no callbacks)
+        if (method === "reverse") return `ding_array_reverse(${arrExpr})`;
+        if (method === "join") {
+          const sep = node.arguments.length >= 1 ? this.emitExpression(node.arguments[0]) : '","';
+          return `ding_array_join(${arrExpr}, ${sep})`;
+        }
+        if (method === "indexOf") {
+          const val = this.emitAs(node.arguments[0], "DingValue");
+          return `ding_array_indexOf(${arrExpr}, ${val})`;
+        }
+        if (method === "slice") {
+          const start = node.arguments.length >= 1 ? this.emitExpression(node.arguments[0]) : "0";
+          const end = node.arguments.length >= 2 ? this.emitExpression(node.arguments[1]) : `${arrExpr}->length`;
+          return `ding_array_slice(${arrExpr}, ${start}, ${end})`;
+        }
         // Higher-order array methods: delegate to resolver-driven inlining
         const arrayTarget = this.resolver.callTargetOf(node);
         if (arrayTarget && arrayTarget.kind === "array-method") {
@@ -1379,6 +1397,48 @@ export class CEmitter {
           `      }`,
           `    }`,
           `    ${foundTmp};`,
+          `  })`,
+        ];
+        return lines.join("\n");
+      }
+      case "some": {
+        if (!target.callback) throw new DingError("emitter", "some requires a callback");
+        const resTmp = `__result_${this.tempCounter++}`;
+        const paramName = target.callback.params[0]?.name ?? "__el";
+        const body = this.emitInlinedCallbackBody(target.callback, paramName);
+        const lines = [
+          `({`,
+          `    DingArray* ${srcTmp} = ${arrExpr};`,
+          `    ding_bool ${resTmp} = false;`,
+          `    for (ding_int ${idxTmp} = 0; ${idxTmp} < ${srcTmp}->length; ${idxTmp}++) {`,
+          `      DingValue ${paramName} = ${srcTmp}->items[${idxTmp}];`,
+          `      if (${body}) {`,
+          `        ${resTmp} = true;`,
+          `        break;`,
+          `      }`,
+          `    }`,
+          `    ${resTmp};`,
+          `  })`,
+        ];
+        return lines.join("\n");
+      }
+      case "every": {
+        if (!target.callback) throw new DingError("emitter", "every requires a callback");
+        const resTmp = `__result_${this.tempCounter++}`;
+        const paramName = target.callback.params[0]?.name ?? "__el";
+        const body = this.emitInlinedCallbackBody(target.callback, paramName);
+        const lines = [
+          `({`,
+          `    DingArray* ${srcTmp} = ${arrExpr};`,
+          `    ding_bool ${resTmp} = true;`,
+          `    for (ding_int ${idxTmp} = 0; ${idxTmp} < ${srcTmp}->length; ${idxTmp}++) {`,
+          `      DingValue ${paramName} = ${srcTmp}->items[${idxTmp}];`,
+          `      if (!(${body})) {`,
+          `        ${resTmp} = false;`,
+          `        break;`,
+          `      }`,
+          `    }`,
+          `    ${resTmp};`,
           `  })`,
         ];
         return lines.join("\n");

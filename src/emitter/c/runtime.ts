@@ -6,6 +6,7 @@ export const C_RUNTIME = `\
 #include <stdbool.h>
 #include <math.h>
 #include <setjmp.h>
+#include <unistd.h>
 
 // ── Ding types ──────────────────────────────────────────────────────
 

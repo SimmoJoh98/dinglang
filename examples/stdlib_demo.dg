@@ -1,0 +1,58 @@
+import { log } from 'ding:std'
+import { sin, cos, clamp, sign, log2, log10, atan2 } from 'ding:math'
+import { env, cwd } from 'ding:io'
+
+// ── String methods ─────────────────────────────────────────────────
+
+const greeting = "  Hello, World!  "
+log(`trim:      '${greeting.trim()}'`)
+log(`trimStart: '${greeting.trimStart()}'`)
+log(`trimEnd:   '${greeting.trimEnd()}'`)
+
+const msg = "hello world"
+log(`charAt(0):     ${msg.charAt(0)}`)
+log(`charCodeAt(0): ${msg.charCodeAt(0)}`)
+log(`toUpperCase:   ${msg.toUpperCase()}`)
+log(`padStart:      '${msg.padStart(20, ".")}'`)
+log(`padEnd:        '${msg.padEnd(20, ".")}'`)
+
+const csv = "one,two,three,one,two"
+log(`replace:    ${csv.replace("one", "ONE")}`)
+log(`replaceAll: ${csv.replaceAll("one", "ONE")}`)
+
+// ── Array methods ──────────────────────────────────────────────────
+
+const nums: number[] = [5, 3, 1, 4, 2]
+
+const reversed = nums.reverse()
+log(`reversed: ${reversed.join(", ")}`)
+
+const idx = nums.indexOf(4)
+log(`indexOf(4): ${idx}`)
+
+const sliced = nums.slice(1, 3)
+log(`slice(1,3): ${sliced.join(", ")}`)
+
+const hasEven = nums.some((n) => n % 2 == 0)
+log(`some even: ${hasEven}`)
+
+const allPositive = nums.every((n) => n > 0)
+log(`all positive: ${allPositive}`)
+
+const allBig = nums.every((n) => n > 10)
+log(`all > 10: ${allBig}`)
+
+// ── Math ───────────────────────────────────────────────────────────
+
+log(`sin(1.0):       ${sin(1.0)}`)
+log(`cos(0.0):       ${cos(0.0)}`)
+log(`atan2(1, 1):    ${atan2(1.0, 1.0)}`)
+log(`log2(256):      ${log2(256.0)}`)
+log(`log10(1000):    ${log10(1000.0)}`)
+log(`sign(-42):      ${sign(-42.0)}`)
+log(`clamp(15,0,10): ${clamp(15.0, 0.0, 10.0)}`)
+
+// ── IO ─────────────────────────────────────────────────────────────
+
+log(`cwd: ${cwd()}`)
+log(`HOME: ${env("HOME")}`)

@@ -88,6 +88,38 @@ const math: StdlibModule = new Map([
     name: "sqrt",
     implementation: "const sqrt = (n) => Math.sqrt(n);",
   }],
+  ["sin", {
+    name: "sin",
+    implementation: "const sin = (n) => Math.sin(n);",
+  }],
+  ["cos", {
+    name: "cos",
+    implementation: "const cos = (n) => Math.cos(n);",
+  }],
+  ["tan", {
+    name: "tan",
+    implementation: "const tan = (n) => Math.tan(n);",
+  }],
+  ["atan2", {
+    name: "atan2",
+    implementation: "const atan2 = (y, x) => Math.atan2(y, x);",
+  }],
+  ["log2", {
+    name: "log2",
+    implementation: "const log2 = (n) => Math.log2(n);",
+  }],
+  ["log10", {
+    name: "log10",
+    implementation: "const log10 = (n) => Math.log10(n);",
+  }],
+  ["sign", {
+    name: "sign",
+    implementation: "const sign = (n) => Math.sign(n);",
+  }],
+  ["clamp", {
+    name: "clamp",
+    implementation: "const clamp = (val, lo, hi) => Math.min(Math.max(val, lo), hi);",
+  }],
 ]);
 
 // ── ding:io ─────────────────────────────────────────────────────────
@@ -116,6 +148,18 @@ const io: StdlibModule = new Map([
   ["exists", {
     name: "exists",
     implementation: "import { existsSync as __existsSync } from 'node:fs';\nconst exists = (path) => __existsSync(path);",
+  }],
+  ["env", {
+    name: "env",
+    implementation: "const env = (name) => process.env[name] ?? '';",
+  }],
+  ["exit", {
+    name: "exit",
+    implementation: "const exit = (code) => process.exit(code);",
+  }],
+  ["cwd", {
+    name: "cwd",
+    implementation: "const cwd = () => process.cwd();",
   }],
 ]);
 

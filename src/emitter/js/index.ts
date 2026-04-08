@@ -34,6 +34,7 @@ import type {
   MatchArm,
   DestructuringDeclaration,
   MapLiteral,
+  ConditionalExpression,
 } from "../../ast/nodes.js";
 import { isDingModule, getPolyfill, getModule } from "../../std/index.js";
 
@@ -396,6 +397,8 @@ export class JSEmitter {
         return this.emitMapLiteral(node);
       case "MatchExpression":
         return this.emitMatchExpression(node);
+      case "ConditionalExpression":
+        return `(${this.emitExpression(node.test)} ? ${this.emitExpression(node.consequent)} : ${this.emitExpression(node.alternate)})`;
       default:
         throw new DingError("emitter", `Internal compiler error — unknown expression type '${(node as any).type}'`, {
           hint: "Please report this at github.com/user/dinglang",

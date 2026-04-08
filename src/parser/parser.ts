@@ -45,6 +45,7 @@ import type {
   MapLiteral,
   SpawnStatement,
   TypeAliasDeclaration,
+  ConditionalExpression,
 } from "../ast/nodes.js";
 
 export class Parser {
@@ -119,6 +120,29 @@ export class Parser {
     const idx = this.pos + offset;
     if (idx >= this.tokens.length) return this.tokens[this.tokens.length - 1];
     return this.tokens[idx];
+  }
+
+  private canStartExpression(token: Token): boolean {
+    switch (token.type) {
+      case TokenType.Number:
+      case TokenType.String:
+      case TokenType.Identifier:
+      case TokenType.LeftParen:
+      case TokenType.LeftBracket:
+      case TokenType.LeftBrace:
+      case TokenType.Bang:
+      case TokenType.Minus:
+      case TokenType.Hash:
+      case TokenType.Tilde:
+      case TokenType.True:
+      case TokenType.False:
+      case TokenType.Null:
+      case TokenType.Match:
+      case TokenType.Backtick:
+        return true;
+      default:
+        return false;
+    }
   }
 
   // ── Statements ─────────────────────────────────────────────────────
@@ -503,24 +527,25 @@ export class Parser {
   // ── Expressions (precedence climbing) ──────────────────────────────
   //
   // Precedence (low → high):
-  //  1. Assignment  (= += -= *= /= %=)
-  //  2. Pipe        (|>)
-  //  3. Logical OR  (||)
-  //  4. Logical AND (&&)
-  //  5. Nullish     (??)
-  //  6. Equality    (== !=)
-  //  7. Comparison  (< > <= >=)
-  //  8. Bitwise OR  (|)
-  //  9. Bitwise XOR (^)
-  // 10. Bitwise AND (&)
-  // 11. Shift       (<< >>)
-  // 12. Additive    (+ -)
-  // 13. Multiplicative (* / %)
-  // 14. Exponentiation (**)  — right-associative
-  // 15. Unary       (! - # ~)
-  // 16. Postfix     (? !)
-  // 17. Call/Member  (f() . ?. [])
-  // 18. Primary     (literals, identifiers, parens, arrays, match)
+  //  1. Assignment   (= += -= *= /= %=)
+  //  2. Pipe         (|>)
+  //  3. Ternary      (? :)  — right-associative
+  //  4. Logical OR   (||)
+  //  5. Logical AND  (&&)
+  //  6. Nullish      (??)
+  //  7. Equality     (== !=)
+  //  8. Comparison   (< > <= >=)
+  //  9. Bitwise OR   (|)
+  // 10. Bitwise XOR  (^)
+  // 11. Bitwise AND  (&)
+  // 12. Shift        (<< >>)
+  // 13. Additive     (+ -)
+  // 14. Multiplicative (* / %)
+  // 15. Exponentiation (**)  — right-associative
+  // 16. Unary        (! - # ~)
+  // 17. Postfix      (? !)
+  // 18. Call/Member   (f() . ?. [])
+  // 19. Primary      (literals, identifiers, parens, arrays, match)
 
   parseExpression(): Expression {
     return this.parseAssignment();
@@ -558,10 +583,10 @@ export class Parser {
   }
 
   private parsePipe(): Expression {
-    let left = this.parseOr();
+    let left = this.parseTernary();
     while (this.current().type === TokenType.PipeGreater) {
       this.advance(); // consume |>
-      const right = this.parseOr();
+      const right = this.parseTernary();
       // Desugar: a |> f(b) → f(a, b), a |> f → f(a)
       if (right.type === "CallExpression") {
         right.arguments.unshift(left);
@@ -571,6 +596,18 @@ export class Parser {
       }
     }
     return left;
+  }
+
+  private parseTernary(): Expression {
+    const test = this.parseOr();
+    if (this.current().type === TokenType.QuestionMark) {
+      this.advance(); // consume ?
+      const consequent = this.parseTernary(); // right-associative
+      this.expect(TokenType.Colon);
+      const alternate = this.parseTernary(); // right-associative
+      return { type: "ConditionalExpression", test, consequent, alternate } as ConditionalExpression;
+    }
+    return test;
   }
 
   private parseOr(): Expression {
@@ -743,8 +780,10 @@ export class Parser {
   private parsePostfix(): Expression {
     let expr = this.parseCallMember();
 
-    // Postfix ? (error propagation) — only if not followed by . or ?
-    if (this.current().type === TokenType.QuestionMark) {
+    // Postfix ? (error propagation) — only if not a ternary operator.
+    // Disambiguate: if ? is followed by a token that can start an expression,
+    // it's a ternary (handled at lower precedence), not error propagation.
+    if (this.current().type === TokenType.QuestionMark && !this.canStartExpression(this.peek(1))) {
       this.advance();
       expr = { type: "ErrorPropagation", expression: expr } as ErrorPropagation;
     }

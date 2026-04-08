@@ -107,6 +107,7 @@ const SNIPPET_COMPLETIONS: Array<{ label: string; insert: string }> = [
   { label: "import-http", insert: "import { get, post } from 'ding:http'" },
   { label: "import-concurrent", insert: "import { Channel } from 'ding:concurrent'" },
   { label: "spawn", insert: "spawn () => {\n\t$0\n}" },
+  { label: "ternary", insert: "${1:condition} ? ${2:then} : ${3:else}" },
 ];
 
 export function getCompletionItems(): CompletionItem[] {

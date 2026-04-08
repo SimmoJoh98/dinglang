@@ -44,7 +44,8 @@ export type Expression =
   | NullAssertion
   | AssignmentExpression
   | MatchExpression
-  | MapLiteral;
+  | MapLiteral
+  | ConditionalExpression;
 
 export type ASTNode = Statement | Expression;
 
@@ -346,6 +347,15 @@ export interface TypeAliasDeclaration {
 export interface SpawnStatement {
   type: "SpawnStatement";
   body: Expression; // ArrowFunction or CallExpression
+}
+
+// ── Ternary ──────────────────────────────────────────────────────
+
+export interface ConditionalExpression {
+  type: "ConditionalExpression";
+  test: Expression;
+  consequent: Expression;
+  alternate: Expression;
 }
 
 // ── Maps ──────────────────────────────────────────────────────────

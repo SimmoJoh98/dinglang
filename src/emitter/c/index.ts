@@ -34,6 +34,7 @@ import type {
   DestructuringDeclaration,
   MapLiteral,
   SpawnStatement,
+  ConditionalExpression,
 } from "../../ast/nodes.js";
 import { C_RUNTIME } from "./runtime.js";
 import { cArena, DEFAULT_ARENA_SIZE } from "./arena.js";
@@ -833,6 +834,8 @@ export class CEmitter {
         return `${this.emitExpression(node.target)} = ${this.emitExpression(node.value)}`;
       case "MatchExpression":
         return this.emitMatchExpression(node);
+      case "ConditionalExpression":
+        return `(${this.emitExpression(node.test)} ? ${this.emitExpression(node.consequent)} : ${this.emitExpression(node.alternate)})`;
       default:
         throw new DingError(
           "emitter",

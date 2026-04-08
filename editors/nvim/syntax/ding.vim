@@ -51,7 +51,7 @@ syn match   dingOperator      "<<"
 syn match   dingOperator      ">>"
 syn match   dingOperator      "&&"
 syn match   dingOperator      "||"
-syn match   dingOperator      "[=<>+\-*/%!&|^~#]"
+syn match   dingOperator      "[=<>+\-*/%!&|^~#?]"
 
 " Strings
 syn region  dingString        start=+"+ skip=+\\\\\|\\"+ end=+"+ contains=dingEscape

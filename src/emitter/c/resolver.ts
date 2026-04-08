@@ -734,6 +734,12 @@ export class Resolver {
         for (const arm of expr.arms) this.visitMatchArm(arm);
         return "DingValue";
       }
+      case "ConditionalExpression": {
+        this.visitExpression(expr.test);
+        const ct = this.visitExpression(expr.consequent);
+        this.visitExpression(expr.alternate);
+        return ct;
+      }
     }
   }
 
